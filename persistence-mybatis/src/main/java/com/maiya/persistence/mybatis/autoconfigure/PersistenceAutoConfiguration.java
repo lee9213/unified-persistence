@@ -19,7 +19,7 @@ import org.springframework.context.annotation.Bean;
 public class PersistenceAutoConfiguration {
 
     /**
-     * 注册 Mapper 注册表 Bean 用于管理和注册实体与数据对象之间的映射关系
+     * 注册 Mapper 注册表 Bean 容器启动时扫描所有 BaseMapper，解析泛型获取 DO Class 并缓存
      *
      * @return MapperRegistry 实例
      */
@@ -31,11 +31,12 @@ public class PersistenceAutoConfiguration {
     /**
      * 注册元数据解析器 Bean 用于解析实体类的元数据信息，如主键、字段映射等
      *
+     * @param mapperRegistry Mapper 注册表
      * @return MetadataResolver 实例
      */
     @Bean
-    public MetadataResolver metadataResolver() {
-        return new MetadataResolver();
+    public MetadataResolver metadataResolver(MapperRegistry mapperRegistry) {
+        return new MetadataResolver(mapperRegistry);
     }
 
     /**

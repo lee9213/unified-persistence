@@ -17,23 +17,17 @@ import org.springframework.stereotype.Component;
 @Component
 public class AggregateRepositoryImpl<T> implements AggregateRepository<T> {
 
-    /**
-     * 差异引擎，用于生成变更集
-     */
-    @Autowired
-    private DiffEngine diffEngine;
+    /** 差异引擎，用于生成变更集 */
+    @Autowired private DiffEngine diffEngine;
 
-    /**
-     * 变更执行器，用于将变更集同步到数据库
-     */
-    @Autowired
-    private ChangeExecutor changeExecutor;
+    /** 变更执行器，用于将变更集同步到数据库 */
+    @Autowired private ChangeExecutor changeExecutor;
 
     /**
      * 对比两个聚合实体对象，生成变更集。
      *
      * @param before 变更前的实体对象
-     * @param after  变更后的实体对象
+     * @param after 变更后的实体对象
      * @return 变更集
      */
     @Override
@@ -55,7 +49,7 @@ public class AggregateRepositoryImpl<T> implements AggregateRepository<T> {
      * 一键持久化：先对比差异（事务外），再执行变更（事务内，跨 Bean 调用代理生效）。
      *
      * @param before 变更前的实体对象
-     * @param after  变更后的实体对象
+     * @param after 变更后的实体对象
      */
     @Override
     public void persist(T before, T after) {
