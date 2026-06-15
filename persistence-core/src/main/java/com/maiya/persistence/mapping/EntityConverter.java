@@ -13,7 +13,7 @@ import org.springframework.stereotype.Component;
  * @author 萨博
  */
 @Component
-public class EntityCopier {
+public class EntityConverter {
 
     /** MapStruct 转换器，用于对象之间的映射转换 */
     @Autowired private Converter converter;
@@ -26,7 +26,7 @@ public class EntityCopier {
      * @return 深度拷贝后的新对象
      */
     @SuppressWarnings("unchecked")
-    public <T> T deepCopy(T source) {
+    public <T> T convert(T source) {
         if (source == null) return null;
         return converter.convert(source, (Class<T>) source.getClass());
     }

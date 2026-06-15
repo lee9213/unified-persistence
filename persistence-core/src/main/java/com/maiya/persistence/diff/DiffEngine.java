@@ -51,6 +51,7 @@ public class DiffEngine {
                             .type(ChangeType.INSERT)
                             .entityClass(metadata.getEntityClass())
                             .doClass(metadata.getDoMetadata().getDoClass())
+                            .mapper(metadata.getDoMetadata().getMapper())
                             .entity(doValue)
                             .build());
             collectInserts(after, metadata, changes);
@@ -107,6 +108,7 @@ public class DiffEngine {
                             .idFieldName(doMeta.getIdFieldName())
                             .entityClass(metadata.getEntityClass())
                             .doClass(doMeta.getDoClass())
+                            .mapper(doMeta.getMapper())
                             .fieldChanges(fieldChanges)
                             .build());
         }
@@ -153,6 +155,7 @@ public class DiffEngine {
                             .idFieldName(doMeta.getIdFieldName())
                             .entityClass(subMeta.getEntityClass())
                             .doClass(doMeta.getDoClass())
+                            .mapper(doMeta.getMapper())
                             .entity(doValue)
                             .build());
             collectDeletes(oldSub, subMeta, changes);
@@ -164,6 +167,7 @@ public class DiffEngine {
                             .type(ChangeType.INSERT)
                             .entityClass(subMeta.getEntityClass())
                             .doClass(doMeta.getDoClass())
+                            .mapper(doMeta.getMapper())
                             .entity(doValue)
                             .build());
             collectInserts(newSub, subMeta, changes);
@@ -181,6 +185,7 @@ public class DiffEngine {
                                 .idFieldName(doMeta.getIdFieldName())
                                 .entityClass(subMeta.getEntityClass())
                                 .doClass(doMeta.getDoClass())
+                                .mapper(doMeta.getMapper())
                                 .entity(newDO)
                                 .fieldChanges(fieldChanges)
                                 .build());
@@ -248,6 +253,7 @@ public class DiffEngine {
                                 .type(ChangeType.INSERT)
                                 .entityClass(listMeta.getEntityClass())
                                 .doClass(doMeta.getDoClass())
+                                .mapper(doMeta.getMapper())
                                 .entity(newMap.get(id))
                                 .build());
                 Object newEntity = findEntityById(newList, id, doMeta);
@@ -311,6 +317,7 @@ public class DiffEngine {
                                     .type(ChangeType.INSERT)
                                     .entityClass(subMeta.getEntityClass())
                                     .doClass(doMeta.getDoClass())
+                                    .mapper(doMeta.getMapper())
                                     .entity(converter.convert(subEntity, doMeta.getDoClass()))
                                     .build());
                     collectInserts(subEntity, subMeta, changes);
@@ -329,6 +336,7 @@ public class DiffEngine {
                                         .type(ChangeType.INSERT)
                                         .entityClass(listMeta.getEntityClass())
                                         .doClass(doMeta.getDoClass())
+                                        .mapper(doMeta.getMapper())
                                         .entity(converter.convert(subEntity, doMeta.getDoClass()))
                                         .build());
                         collectInserts(subEntity, listMeta, changes);
@@ -356,6 +364,7 @@ public class DiffEngine {
                                     .idFieldName(doMeta.getIdFieldName())
                                     .entityClass(subMeta.getEntityClass())
                                     .doClass(doMeta.getDoClass())
+                                    .mapper(doMeta.getMapper())
                                     .entity(doValue)
                                     .build());
                     collectDeletes(subEntity, subMeta, changes);
@@ -378,6 +387,7 @@ public class DiffEngine {
                                         .idFieldName(doMeta.getIdFieldName())
                                         .entityClass(listMeta.getEntityClass())
                                         .doClass(doMeta.getDoClass())
+                                        .mapper(doMeta.getMapper())
                                         .entity(doValue)
                                         .build());
                         collectDeletes(subEntity, listMeta, changes);

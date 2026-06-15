@@ -1,5 +1,6 @@
 package com.maiya.persistence.model;
 
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import java.util.List;
 import lombok.Builder;
 import lombok.Data;
@@ -28,6 +29,9 @@ public class EntityChange {
 
     /** 数据对象类类型 */
     private Class<?> doClass;
+
+    /** DO 对应的 Mapper 实例 */
+    private BaseMapper<?> mapper;
 
     /** 实体对象实例（DO 对象） */
     private Object entity;

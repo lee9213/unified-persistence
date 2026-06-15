@@ -2,6 +2,11 @@ package com.maiya.persistence.mapping;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import io.github.linpeilie.annotations.AutoMapper;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
+import org.springframework.core.ResolvableType;
+
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Field;
@@ -9,10 +14,6 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.HashMap;
 import java.util.Map;
-import org.springframework.beans.factory.InitializingBean;
-import org.springframework.context.ApplicationContext;
-import org.springframework.context.ApplicationContextAware;
-import org.springframework.core.ResolvableType;
 
 /**
  * Mapper 注册中心，负责管理和缓存 MyBatis-Plus 的 BaseMapper 实例。
@@ -38,29 +39,23 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
         this.applicationContext = applicationContext;
     }
 
-    @Override
-    public void afterPropertiesSet() {
-        scanMappers();
-    }
-
     /**
      * 扫描 Spring 容器中所有 BaseMapper Bean，解析泛型参数获取 DO Class， 通过 @AutoMapper 注解获取 Entity Class， 预解析 DO
      * 元数据并以 Entity Class 为 key 注册到注册表中。
      */
-    @SuppressWarnings("unchecked")
-    private void scanMappers() {
-        Map<String, BaseMapper> mapperBeans = applicationContext.getBeansOfType(BaseMapper.class);
-        for (Map.Entry<String, BaseMapper> entry : mapperBeans.entrySet()) {
-            BaseMapper<?> mapper = entry.getValue();
+    @Override
+    public void afterPropertiesSet() {
+        applicationContext.getBeansOfType(BaseMapper.class).values().forEach(mapper -> {
             Class<?> doClass = resolveDoClassFromMapper(mapper);
-            if (doClass != null) {
-                Class<?> entityClass = resolveEntityClassFromDo(doClass);
-                if (entityClass != null) {
-                    DoMetadata doMetadata = resolveDoMetadata(doClass, mapper);
-                    doMetadataMap.put(entityClass, doMetadata);
-                }
+            if (doClass == null) {
+                return;
             }
-        }
+            Class<?> entityClass = resolveEntityClassFromDo(doClass);
+            if (entityClass == null) {
+                return;
+            }
+            doMetadataMap.put(entityClass, resolveDoMetadata(doClass, mapper));
+        });
     }
 
     /**
@@ -70,8 +65,7 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
      * @return DO 类的 Class 对象，解析失败返回 null
      */
     private Class<?> resolveDoClassFromMapper(BaseMapper<?> mapper) {
-        ResolvableType resolvableType =
-                ResolvableType.forClass(mapper.getClass()).as(BaseMapper.class);
+        ResolvableType resolvableType = ResolvableType.forClass(mapper.getClass()).as(BaseMapper.class);
         Class<?> generic = resolvableType.getGeneric(0).resolve();
         // 过滤掉框架内部类
         if (generic != null && !generic.getName().startsWith("java.")) {
@@ -105,13 +99,11 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
 
         // 遍历 DO 字段，识别主键和基本字段
         for (Field doField : doClass.getDeclaredFields()) {
-            if (Modifier.isStatic(doField.getModifiers())
-                    || Modifier.isTransient(doField.getModifiers())) {
+            if (Modifier.isStatic(doField.getModifiers()) || Modifier.isTransient(doField.getModifiers())) {
                 continue;
             }
             if (doField.getAnnotation(com.baomidou.mybatisplus.annotation.TableField.class) != null
-                    && !doField.getAnnotation(com.baomidou.mybatisplus.annotation.TableField.class)
-                            .exist()) {
+                && !doField.getAnnotation(com.baomidou.mybatisplus.annotation.TableField.class).exist()) {
                 continue;
             }
             if (doField.getAnnotation(com.baomidou.mybatisplus.annotation.TableId.class) != null) {
@@ -120,16 +112,12 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
                 metadata.setIdGetter(findGetter(doClass, doField.getName()));
             } else {
                 // 基本字段
-                metadata.getBasicFields()
-                        .add(
-                                new EntityMetadata.FieldAccessor(
-                                        doField.getName(), findGetter(doClass, doField.getName())));
+                metadata.getBasicFields().add(new EntityMetadata.FieldAccessor(doField.getName(), findGetter(doClass, doField.getName())));
             }
         }
 
         if (metadata.getIdFieldName() == null) {
-            throw new IllegalArgumentException(
-                    "DO " + doClass.getName() + " 没有找到 @TableId 注解的主键字段");
+            throw new IllegalArgumentException("DO " + doClass.getName() + " 没有找到 @TableId 注解的主键字段");
         }
 
         return metadata;
@@ -143,24 +131,20 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
      * @return getter 方法的 MethodHandle
      */
     private MethodHandle findGetter(Class<?> clazz, String fieldName) {
-        String getterName =
-                "get" + Character.toUpperCase(fieldName.charAt(0)) + fieldName.substring(1);
+        String getterName = "get" + Character.toUpperCase(fieldName.charAt(0)) + fieldName.substring(1);
         try {
             Method getter = clazz.getDeclaredMethod(getterName);
             return LOOKUP.unreflect(getter);
         } catch (NoSuchMethodException e) {
-            String isGetterName =
-                    "is" + Character.toUpperCase(fieldName.charAt(0)) + fieldName.substring(1);
+            String isGetterName = "is" + Character.toUpperCase(fieldName.charAt(0)) + fieldName.substring(1);
             try {
                 Method isGetter = clazz.getDeclaredMethod(isGetterName);
                 return LOOKUP.unreflect(isGetter);
             } catch (NoSuchMethodException | IllegalAccessException ex) {
-                throw new IllegalArgumentException(
-                        "类 " + clazz.getName() + " 没有找到字段 " + fieldName + " 的 getter 方法", ex);
+                throw new IllegalArgumentException("类 " + clazz.getName() + " 没有找到字段 " + fieldName + " 的 getter 方法", ex);
             }
         } catch (IllegalAccessException e) {
-            throw new IllegalArgumentException(
-                    "无法访问 " + clazz.getName() + "." + getterName + " 方法", e);
+            throw new IllegalArgumentException("无法访问 " + clazz.getName() + "." + getterName + " 方法", e);
         }
     }
 
@@ -172,20 +156,5 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
      */
     public DoMetadata getDoMetadata(Class<?> entityClass) {
         return doMetadataMap.get(entityClass);
-    }
-
-    /**
-     * 根据 DO Class 获取预解析的 DO 元数据。
-     *
-     * @param doClass DO 类
-     * @return DO 元数据，未找到则返回 null
-     */
-    public DoMetadata getDoMetadataByDoClass(Class<?> doClass) {
-        for (DoMetadata metadata : doMetadataMap.values()) {
-            if (metadata.getDoClass().equals(doClass)) {
-                return metadata;
-            }
-        }
-        return null;
     }
 }

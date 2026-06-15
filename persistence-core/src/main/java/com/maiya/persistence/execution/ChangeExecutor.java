@@ -2,13 +2,13 @@ package com.maiya.persistence.execution;
 
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
-import com.maiya.persistence.mapping.DoMetadata;
-import com.maiya.persistence.mapping.MapperRegistry;
-import com.maiya.persistence.model.*;
+import com.maiya.persistence.model.ChangeType;
+import com.maiya.persistence.model.EntityChange;
+import com.maiya.persistence.model.FieldChange;
 import java.io.Serializable;
-import java.util.*;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -23,8 +23,6 @@ import org.springframework.transaction.annotation.Transactional;
  */
 @Component
 public class ChangeExecutor {
-
-    @Autowired private MapperRegistry mapperRegistry;
 
     /**
      * 执行变更列表，按 DO 类型分组，批量处理删除和插入，逐条处理更新。
@@ -43,9 +41,8 @@ public class ChangeExecutor {
                 changes.stream().collect(Collectors.groupingBy(EntityChange::getDoClass));
 
         for (Map.Entry<Class<?>, List<EntityChange>> entry : grouped.entrySet()) {
-            Class<?> doClass = entry.getKey();
             List<EntityChange> group = entry.getValue();
-            BaseMapper mapper = getMapper(doClass);
+            BaseMapper mapper = group.get(0).getMapper();
 
             // 先执行删除，避免外键冲突
             List<Serializable> deleteIds =
@@ -101,20 +98,5 @@ public class ChangeExecutor {
             wrapper.set(fc.getFieldName(), fc.getNewValue());
         }
         mapper.update(null, wrapper);
-    }
-
-    /**
-     * 根据 DO Class 获取对应的 BaseMapper 实例。
-     *
-     * @param doClass DO 类
-     * @return BaseMapper 实例
-     */
-    @SuppressWarnings("rawtypes")
-    private BaseMapper getMapper(Class<?> doClass) {
-        DoMetadata doMetadata = mapperRegistry.getDoMetadataByDoClass(doClass);
-        if (doMetadata == null) {
-            throw new IllegalArgumentException("DO " + doClass.getName() + " 对应的元数据未在注册表中找到");
-        }
-        return doMetadata.getMapper();
     }
 }

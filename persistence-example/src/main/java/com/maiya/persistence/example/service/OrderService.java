@@ -4,7 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.maiya.persistence.example.data.*;
 import com.maiya.persistence.example.entity.*;
 import com.maiya.persistence.example.mapper.*;
-import com.maiya.persistence.mapping.EntityCopier;
+import com.maiya.persistence.mapping.EntityConverter;
 import com.maiya.persistence.repository.PersistenceRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -27,8 +27,8 @@ public class OrderService {
     /** 订单收货地址数据访问接口 */
     private final OrderAddressMapper orderAddressMapper;
 
-    /** 实体拷贝器，用于 DO 和 Entity 之间的转换 */
-    private final EntityCopier entityCopier;
+    /** 实体转换器，用于 DO 和 Entity 之间的转换 */
+    private final EntityConverter entityConverter;
 
     /** 订单聚合仓库，用于管理订单聚合的持久化操作 */
     private final PersistenceRepository<OrderEntity> orderRepository;
@@ -52,14 +52,14 @@ public class OrderService {
         OrderDO orderDO = orderMapper.selectById(orderId);
         if (orderDO == null) return null;
 
-        OrderEntity order = entityCopier.toEntity(orderDO, OrderEntity.class);
+        OrderEntity order = entityConverter.toEntity(orderDO, OrderEntity.class);
         order.setItems(
-                entityCopier.toList(
+                entityConverter.toList(
                         orderItemMapper.selectList(
                                 new QueryWrapper<OrderItemDO>().eq("orderId", orderId)),
                         OrderItemEntity.class));
         order.setAddress(
-                entityCopier.toEntity(
+                entityConverter.toEntity(
                         orderAddressMapper.selectOne(
                                 new QueryWrapper<OrderAddressDO>().eq("orderId", orderId)),
                         OrderAddressEntity.class));
@@ -74,7 +74,7 @@ public class OrderService {
      */
     public void updateOrder(Long orderId, String newCustomerName) {
         OrderEntity order = loadOrder(orderId);
-        OrderEntity before = entityCopier.deepCopy(order);
+        OrderEntity before = entityConverter.convert(order);
         order.setCustomerName(newCustomerName);
         orderRepository.persist(before, order);
     }

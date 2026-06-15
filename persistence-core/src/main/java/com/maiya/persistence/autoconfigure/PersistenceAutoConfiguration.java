@@ -2,7 +2,7 @@ package com.maiya.persistence.autoconfigure;
 
 import com.maiya.persistence.diff.DiffEngine;
 import com.maiya.persistence.execution.ChangeExecutor;
-import com.maiya.persistence.mapping.EntityCopier;
+import com.maiya.persistence.mapping.EntityConverter;
 import com.maiya.persistence.mapping.MapperRegistry;
 import com.maiya.persistence.mapping.MetadataResolver;
 import com.maiya.persistence.repository.PersistenceRepository;
@@ -42,13 +42,13 @@ public class PersistenceAutoConfiguration {
     }
 
     /**
-     * 注册实体拷贝器 Bean。用于实现实体（Entity）与数据对象（DO）之间的相互转换和深拷贝。
+     * 注册实体转换器 Bean。用于实现实体（Entity）与数据对象（DO）之间的相互转换和深拷贝。
      *
-     * @return EntityCopier 实例
+     * @return EntityConverter 实例
      */
     @Bean
-    public EntityCopier entityCopier() {
-        return new EntityCopier();
+    public EntityConverter entityConverter() {
+        return new EntityConverter();
     }
 
     /**
