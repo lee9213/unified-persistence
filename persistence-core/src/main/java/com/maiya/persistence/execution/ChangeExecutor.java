@@ -2,15 +2,16 @@ package com.maiya.persistence.execution;
 
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.baomidou.mybatisplus.core.toolkit.StringUtils;
 import com.maiya.persistence.model.ChangeType;
 import com.maiya.persistence.model.EntityChange;
 import com.maiya.persistence.model.FieldChange;
+import org.springframework.transaction.annotation.Transactional;
+
 import java.io.Serializable;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
-import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
 /**
  * 变更执行器，负责将差异引擎生成的变更列表实际执行到数据库。
@@ -21,7 +22,6 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * @author 萨博
  */
-@Component
 public class ChangeExecutor {
 
     /**
@@ -37,44 +37,29 @@ public class ChangeExecutor {
         }
 
         // 按 DO 类型分组
-        Map<Class<?>, List<EntityChange>> grouped =
-                changes.stream().collect(Collectors.groupingBy(EntityChange::getDoClass));
+        Map<Class<?>, List<EntityChange>> grouped = changes.stream().collect(Collectors.groupingBy(EntityChange::getDoClass));
 
         for (Map.Entry<Class<?>, List<EntityChange>> entry : grouped.entrySet()) {
             List<EntityChange> group = entry.getValue();
             BaseMapper mapper = group.get(0).getMapper();
 
             // 先执行删除，避免外键冲突
-            List<Serializable> deleteIds =
-                    group.stream()
-                            .filter(c -> c.getType() == ChangeType.DELETE)
-                            .map(EntityChange::getEntityId)
-                            .map(id -> (Serializable) id)
-                            .collect(Collectors.toList());
+            List<Serializable> deleteIds = group.stream().filter(c -> c.getType() == ChangeType.DELETE)
+                .map(EntityChange::getEntityId).map(id -> (Serializable) id).collect(Collectors.toList());
             if (!deleteIds.isEmpty()) {
                 mapper.deleteBatchIds(deleteIds);
             }
 
             // 批量插入
-            List<Object> insertEntities =
-                    group.stream()
-                            .filter(c -> c.getType() == ChangeType.INSERT)
-                            .map(EntityChange::getEntity)
-                            .collect(Collectors.toList());
+            List<Object> insertEntities = group.stream().filter(c -> c.getType() == ChangeType.INSERT)
+                .map(EntityChange::getEntity).toList();
             for (Object entity : insertEntities) {
                 mapper.insert(entity);
             }
 
             // 逐条更新（每条更新的字段可能不同）
-            group.stream()
-                    .filter(c -> c.getType() == ChangeType.UPDATE)
-                    .forEach(
-                            c ->
-                                    executeFieldLevelUpdate(
-                                            mapper,
-                                            c.getIdFieldName(),
-                                            c.getEntityId(),
-                                            c.getFieldChanges()));
+            group.stream().filter(c -> c.getType() == ChangeType.UPDATE).forEach(c ->
+                executeFieldLevelUpdate(mapper, c.getIdFieldName(), c.getEntityId(), c.getFieldChanges()));
         }
     }
 
@@ -87,15 +72,11 @@ public class ChangeExecutor {
      * @param fieldChanges 变更的字段列表
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
-    private void executeFieldLevelUpdate(
-            BaseMapper mapper,
-            String idFieldName,
-            Object entityId,
-            List<FieldChange> fieldChanges) {
+    private void executeFieldLevelUpdate(BaseMapper mapper, String idFieldName, Object entityId, List<FieldChange> fieldChanges) {
         UpdateWrapper wrapper = new UpdateWrapper<>();
-        wrapper.eq(idFieldName, entityId);
+        wrapper.eq(StringUtils.camelToUnderline(idFieldName), entityId);
         for (FieldChange fc : fieldChanges) {
-            wrapper.set(fc.getFieldName(), fc.getNewValue());
+            wrapper.set(StringUtils.camelToUnderline(fc.getFieldName()), fc.getNewValue());
         }
         mapper.update(null, wrapper);
     }

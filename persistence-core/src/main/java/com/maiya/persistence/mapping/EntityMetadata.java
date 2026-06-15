@@ -26,6 +26,26 @@ public class EntityMetadata {
     /** 一对多子实体列表映射列表 */
     private List<EntityMetadata> subEntityLists;
 
+    /** 父实体上读取该子实体或子实体列表的 getter */
+    private MethodHandle entityGetter;
+
+    /**
+     * 从父实体读取子实体或子实体列表字段值。
+     *
+     * @param parent 父实体实例
+     * @return 子实体对象或子实体列表，父实体为 null 时返回 null
+     */
+    public Object readFromParent(Object parent) {
+        if (parent == null) {
+            return null;
+        }
+        try {
+            return entityGetter.invoke(parent);
+        } catch (Throwable e) {
+            throw new RuntimeException("无法读取实体字段: " + entityClass.getName(), e);
+        }
+    }
+
     /**
      * 字段访问器，封装 DO 字段名和 getter MethodHandle。
      *

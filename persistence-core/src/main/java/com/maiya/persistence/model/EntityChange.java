@@ -1,9 +1,11 @@
 package com.maiya.persistence.model;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
-import java.util.List;
+import com.maiya.persistence.mapping.DoMetadata;
 import lombok.Builder;
 import lombok.Data;
+
+import java.util.List;
 
 /**
  * 实体变更信息，记录实体（根实体或子实体）的变更详情。
@@ -38,4 +40,44 @@ public class EntityChange {
 
     /** 字段变更列表 */
     private List<FieldChange> fieldChanges;
+
+    /**
+     * 构建 INSERT 类型的实体变更。
+     *
+     * @param entityClass 实体类
+     * @param doMetadata DO 元数据
+     * @param entity DO 实例
+     * @return INSERT 类型的实体变更
+     */
+    public static EntityChange insert(Class<?> entityClass, DoMetadata doMetadata, Object entity) {
+        return EntityChange.builder().type(ChangeType.INSERT).entityClass(entityClass).doClass(doMetadata.getDoClass())
+            .mapper(doMetadata.getMapper()).entity(entity).build();
+    }
+
+    /**
+     * 构建 DELETE 类型的实体变更（仅主键）。
+     *
+     * @param entityClass 实体类
+     * @param doMetadata DO 元数据
+     * @param entityId 主键值
+     * @return DELETE 类型的实体变更
+     */
+    public static EntityChange delete(Class<?> entityClass, DoMetadata doMetadata, Object entityId) {
+        return EntityChange.builder().type(ChangeType.DELETE).entityId(entityId).idFieldName(doMetadata.getIdFieldName())
+            .entityClass(entityClass).doClass(doMetadata.getDoClass()).mapper(doMetadata.getMapper()).build();
+    }
+
+    /**
+     * 构建 UPDATE 类型的实体变更。
+     *
+     * @param entityClass 实体类
+     * @param doMetadata DO 元数据
+     * @param entityId 主键值
+     * @param fieldChanges 字段变更列表
+     * @return UPDATE 类型的实体变更
+     */
+    public static EntityChange update(Class<?> entityClass, DoMetadata doMetadata, Object entityId, List<FieldChange> fieldChanges) {
+        return EntityChange.builder().type(ChangeType.UPDATE).entityId(entityId).idFieldName(doMetadata.getIdFieldName())
+            .entityClass(entityClass).doClass(doMetadata.getDoClass()).mapper(doMetadata.getMapper()).fieldChanges(fieldChanges).build();
+    }
 }

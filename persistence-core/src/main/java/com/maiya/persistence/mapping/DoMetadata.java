@@ -9,7 +9,7 @@ import lombok.Data;
 /**
  * DO 元数据，描述单个 DO 类的结构信息。
  *
- * <p>容器启动时由 MapperRegistry 扫描 Mapper 并预解析，运行时直接查表使用，无需重复解析。
+ * <p>容器启动时由 DoMetadataRegistry 扫描 Mapper 并预解析，运行时直接查表使用，无需重复解析。
  *
  * @author 萨博
  */

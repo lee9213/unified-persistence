@@ -37,8 +37,5 @@ public interface PersistenceRepository<T> {
      * @param before 变更前的实体对象
      * @param after 变更后的实体对象
      */
-    default void persist(T before, T after) {
-        List<EntityChange> changes = diff(before, after);
-        execute(changes);
-    }
+    void persist(T before, T after);
 }

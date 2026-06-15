@@ -3,9 +3,9 @@ package com.maiya.persistence.repository;
 import com.maiya.persistence.diff.DiffEngine;
 import com.maiya.persistence.execution.ChangeExecutor;
 import com.maiya.persistence.model.EntityChange;
+import lombok.RequiredArgsConstructor;
+
 import java.util.List;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
 
 /**
  * 聚合仓储实现类，组合差异引擎和变更执行器完成聚合实体的持久化。
@@ -15,12 +15,11 @@ import org.springframework.stereotype.Component;
  * @param <T> 聚合实体类型
  * @author 萨博
  */
-@Component
+@RequiredArgsConstructor
 public class PersistenceRepositoryImpl<T> implements PersistenceRepository<T> {
 
-    @Autowired private DiffEngine diffEngine;
-
-    @Autowired private ChangeExecutor changeExecutor;
+    private final DiffEngine diffEngine;
+    private final ChangeExecutor changeExecutor;
 
     @Override
     public List<EntityChange> diff(T before, T after) {

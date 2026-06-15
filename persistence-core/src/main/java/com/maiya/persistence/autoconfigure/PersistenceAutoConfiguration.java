@@ -3,10 +3,11 @@ package com.maiya.persistence.autoconfigure;
 import com.maiya.persistence.diff.DiffEngine;
 import com.maiya.persistence.execution.ChangeExecutor;
 import com.maiya.persistence.mapping.EntityConverter;
-import com.maiya.persistence.mapping.MapperRegistry;
-import com.maiya.persistence.mapping.MetadataResolver;
+import com.maiya.persistence.mapping.DoMetadataRegistry;
+import com.maiya.persistence.mapping.EntityMetadataResolver;
 import com.maiya.persistence.repository.PersistenceRepository;
 import com.maiya.persistence.repository.PersistenceRepositoryImpl;
+import io.github.linpeilie.Converter;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.context.annotation.Bean;
 
@@ -21,24 +22,24 @@ import org.springframework.context.annotation.Bean;
 public class PersistenceAutoConfiguration {
 
     /**
-     * 注册 Mapper 注册表 Bean。容器启动时扫描所有 BaseMapper，解析泛型获取 DO Class 并缓存。
+     * 注册 DO 元数据注册表 Bean。容器启动时扫描所有 BaseMapper，解析泛型获取 DO Class 并缓存。
      *
-     * @return MapperRegistry 实例
+     * @return DoMetadataRegistry 实例
      */
     @Bean
-    public MapperRegistry mapperRegistry() {
-        return new MapperRegistry();
+    public DoMetadataRegistry doMetadataRegistry() {
+        return new DoMetadataRegistry();
     }
 
     /**
      * 注册元数据解析器 Bean。用于解析实体类的类级元数据模板（结构信息）。
      *
-     * @param mapperRegistry Mapper 注册表
-     * @return MetadataResolver 实例
+     * @param doMetadataRegistry DO 元数据注册表
+     * @return EntityMetadataResolver 实例
      */
     @Bean
-    public MetadataResolver metadataResolver(MapperRegistry mapperRegistry) {
-        return new MetadataResolver(mapperRegistry);
+    public EntityMetadataResolver entityMetadataResolver(DoMetadataRegistry doMetadataRegistry) {
+        return new EntityMetadataResolver(doMetadataRegistry);
     }
 
     /**
@@ -47,8 +48,8 @@ public class PersistenceAutoConfiguration {
      * @return EntityConverter 实例
      */
     @Bean
-    public EntityConverter entityConverter() {
-        return new EntityConverter();
+    public EntityConverter entityConverter(Converter converter) {
+        return new EntityConverter(converter);
     }
 
     /**
@@ -57,8 +58,8 @@ public class PersistenceAutoConfiguration {
      * @return DiffEngine 实例
      */
     @Bean
-    public DiffEngine diffEngine() {
-        return new DiffEngine();
+    public DiffEngine diffEngine(EntityMetadataResolver entityMetadataResolver, Converter converter) {
+        return new DiffEngine(entityMetadataResolver, converter);
     }
 
     /**
@@ -77,7 +78,7 @@ public class PersistenceAutoConfiguration {
      * @return PersistenceRepository 实例
      */
     @Bean
-    public PersistenceRepository<?> persistenceRepository() {
-        return new PersistenceRepositoryImpl<>();
+    public PersistenceRepository<?> persistenceRepository(DiffEngine diffEngine, ChangeExecutor changeExecutor) {
+        return new PersistenceRepositoryImpl<>(diffEngine, changeExecutor);
     }
 }

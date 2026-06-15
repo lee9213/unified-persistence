@@ -14,6 +14,9 @@ public class OrderItemEntity {
     /** 订单商品项ID */
     private Long id;
 
+    /** 所属订单ID */
+    private Long orderId;
+
     /** 商品名称 */
     private String productName;
 

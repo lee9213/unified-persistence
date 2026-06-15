@@ -13,6 +13,9 @@ public class OrderAddressEntity {
     /** 地址ID */
     private Long id;
 
+    /** 所属订单ID */
+    private Long orderId;
+
     /** 省份 */
     private String province;
 

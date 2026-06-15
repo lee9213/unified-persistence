@@ -2,7 +2,7 @@ package com.maiya.persistence.mapping;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import io.github.linpeilie.annotations.AutoMapper;
-import org.springframework.beans.factory.InitializingBean;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
 import org.springframework.core.ResolvableType;
@@ -12,24 +12,24 @@ import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Mapper 注册中心，负责管理和缓存 MyBatis-Plus 的 BaseMapper 实例。
+ * DO 元数据注册中心，负责扫描并缓存 Entity 与 DO 的映射元数据。
  *
  * <p>容器启动时扫描所有 BaseMapper Bean，解析其泛型参数获取对应的 DO Class， 同时通过 DO 上的 @AutoMapper 注解获取对应的 Entity Class，
- * 预解析每个 DO 的元数据（主键、基本字段、Mapper），以 Entity Class 为 key 缓存，供 MetadataResolver 直接查表使用。
+ * 预解析每个 DO 的元数据（主键、基本字段、Mapper），以 Entity Class 为 key 缓存，供 EntityMetadataResolver 直接查表使用。
  *
  * @author 萨博
  */
-public class MapperRegistry implements InitializingBean, ApplicationContextAware {
+public class DoMetadataRegistry implements SmartInitializingSingleton, ApplicationContextAware {
 
     /** Spring 应用上下文，用于从容器中获取 Mapper Bean */
     private ApplicationContext applicationContext;
 
     /** DO 元数据注册表，Key 为 Entity 的 Class（通过 DO 上的 @AutoMapper 注解获取），Value 为预解析的元数据 */
-    private final Map<Class<?>, DoMetadata> doMetadataMap = new HashMap<>();
+    private static final Map<Class<?>, DoMetadata> DO_METADATA_MAP = new ConcurrentHashMap<>();
 
     /** MethodHandle 查找器 */
     private static final MethodHandles.Lookup LOOKUP = MethodHandles.lookup();
@@ -40,11 +40,10 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
     }
 
     /**
-     * 扫描 Spring 容器中所有 BaseMapper Bean，解析泛型参数获取 DO Class， 通过 @AutoMapper 注解获取 Entity Class， 预解析 DO
-     * 元数据并以 Entity Class 为 key 注册到注册表中。
+     * 全部单例 Bean 实例化完成后扫描 Mapper，确保 MyBatis 代理已注册。
      */
     @Override
-    public void afterPropertiesSet() {
+    public void afterSingletonsInstantiated() {
         applicationContext.getBeansOfType(BaseMapper.class).values().forEach(mapper -> {
             Class<?> doClass = resolveDoClassFromMapper(mapper);
             if (doClass == null) {
@@ -54,7 +53,7 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
             if (entityClass == null) {
                 return;
             }
-            doMetadataMap.put(entityClass, resolveDoMetadata(doClass, mapper));
+            DO_METADATA_MAP.put(entityClass, resolveDoMetadata(doClass, mapper));
         });
     }
 
@@ -155,6 +154,6 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
      * @return DO 元数据，未找到则返回 null
      */
     public DoMetadata getDoMetadata(Class<?> entityClass) {
-        return doMetadataMap.get(entityClass);
+        return DO_METADATA_MAP.get(entityClass);
     }
 }
