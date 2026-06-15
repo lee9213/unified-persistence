@@ -5,7 +5,7 @@ import com.maiya.persistence.example.data.*;
 import com.maiya.persistence.example.entity.*;
 import com.maiya.persistence.example.mapper.*;
 import com.maiya.persistence.mapping.EntityCopier;
-import com.maiya.persistence.repository.AggregateRepository;
+import com.maiya.persistence.repository.PersistenceRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -31,7 +31,7 @@ public class OrderService {
     private final EntityCopier entityCopier;
 
     /** 订单聚合仓库，用于管理订单聚合的持久化操作 */
-    private final AggregateRepository<OrderEntity> orderRepository;
+    private final PersistenceRepository<OrderEntity> orderRepository;
 
     /**
      * 创建订单

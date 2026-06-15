@@ -19,9 +19,6 @@ public class DoMetadata {
     /** DO 类类型 */
     private Class<?> doClass;
 
-    /** DO 类的简单名称（如 OrderDO） */
-    private String simpleName;
-
     /** 对应的 BaseMapper 实例 */
     private BaseMapper<?> mapper;
 

@@ -1,19 +1,23 @@
 package com.maiya.persistence.diff;
 
 import com.maiya.persistence.mapping.DoMetadata;
-import com.maiya.persistence.mapping.EntityCopier;
 import com.maiya.persistence.mapping.EntityMetadata;
 import com.maiya.persistence.mapping.EntityMetadata.FieldAccessor;
 import com.maiya.persistence.mapping.MetadataResolver;
-import com.maiya.persistence.model.*;
+import com.maiya.persistence.model.ChangeType;
+import com.maiya.persistence.model.EntityChange;
+import com.maiya.persistence.model.FieldChange;
+import io.github.linpeilie.Converter;
+import java.lang.reflect.Field;
+import java.lang.reflect.ParameterizedType;
 import java.util.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /**
- * 差异引擎，负责对比两个聚合实体对象（before 和 after），生成变更集（ChangeSet）。
+ * 差异引擎，负责对比两个聚合实体（before 和 after），生成变更列表。
  *
- * <p>比对流程：先将 Entity 转换为 DO，再在 DO 层面进行字段级差异检测。 支持递归比对嵌套子实体。ChangeSet 中的 entity 直接就是 DO
+ * <p>流程：先通过 MetadataResolver 获取类级模板，将 Entity 转为 DO，然后在 DO 层面比对差异。 变更列表中的 entity 直接就是 DO
  * 对象，ChangeExecutor 无需再次转换。
  *
  * @author 萨博
@@ -23,252 +27,238 @@ public class DiffEngine {
 
     @Autowired private MetadataResolver metadataResolver;
 
-    @Autowired private EntityCopier entityCopier;
+    @Autowired private Converter converter;
 
     /**
-     * 对比两个实体对象，生成变更集。先将 Entity 转 DO，再在 DO 层面比对。
+     * 对比两个实体对象，生成变更列表。先将 Entity 转为 DO，再在 DO 层面比对。
      *
      * @param before 变更前的实体对象（可为 null）
      * @param after 变更后的实体对象（可为 null）
-     * @return 变更集
+     * @return 变更列表
      */
-    public ChangeSet diff(Object before, Object after) {
-        ChangeSet changeSet = new ChangeSet();
-
+    public List<EntityChange> diff(Object before, Object after) {
+        List<EntityChange> changes = new ArrayList<>();
         if (before == null && after == null) {
-            return changeSet;
+            return changes;
         }
 
-        Class<?> entityClass = after != null ? after.getClass() : before.getClass();
-        EntityMetadata metadata = metadataResolver.resolve(entityClass);
-        DoMetadata doMeta = metadata.getDoMetadata();
-
-        // 先将 Entity 转换为 DO
-        Object beforeDO = before != null ? entityCopier.toDO(before, doMeta.getDoClass()) : null;
-        Object afterDO = after != null ? entityCopier.toDO(after, doMeta.getDoClass()) : null;
-
-        // 新增场景：before 为 null，after 不为 null
-        if (beforeDO == null && afterDO != null) {
-            changeSet.setRootChange(
-                    RootChange.builder()
+        // 新增场景
+        if (before == null && after != null) {
+            EntityMetadata metadata = metadataResolver.resolve(after.getClass());
+            Object doValue = converter.convert(after, metadata.getDoMetadata().getDoClass());
+            changes.add(
+                    EntityChange.builder()
                             .type(ChangeType.INSERT)
                             .entityClass(metadata.getEntityClass())
-                            .doClass(doMeta.getDoClass())
-                            .entity(afterDO)
+                            .doClass(metadata.getDoMetadata().getDoClass())
+                            .entity(doValue)
                             .build());
-            addSubEntityInserts(
-                    after, metadata.getSubEntities(), metadata.getSubEntityLists(), changeSet);
-            return changeSet;
+            collectInserts(after, metadata, changes);
+            return changes;
         }
 
-        // 删除场景：before 不为 null，after 为 null
-        if (beforeDO != null && afterDO == null) {
-            Object id = doMeta.getId(beforeDO);
-            changeSet.setRootChange(
-                    RootChange.builder()
+        // 删除场景
+        if (before != null && after == null) {
+            EntityMetadata metadata = metadataResolver.resolve(before.getClass());
+            Object doValue = converter.convert(before, metadata.getDoMetadata().getDoClass());
+            Object id = metadata.getDoMetadata().getId(doValue);
+            changes.add(
+                    EntityChange.builder()
                             .type(ChangeType.DELETE)
+                            .entityId(id)
+                            .idFieldName(metadata.getDoMetadata().getIdFieldName())
+                            .entityClass(metadata.getEntityClass())
+                            .doClass(metadata.getDoMetadata().getDoClass())
+                            .build());
+            collectDeletes(before, metadata, changes);
+            return changes;
+        }
+
+        // 更新场景：对比两个实体
+        EntityMetadata metadata = metadataResolver.resolve(before.getClass());
+        Object beforeDO = converter.convert(before, metadata.getDoMetadata().getDoClass());
+        Object afterDO = converter.convert(after, metadata.getDoMetadata().getDoClass());
+
+        diffRoot(metadata, beforeDO, afterDO, changes);
+        diffSubEntities(before, after, metadata, changes);
+
+        return changes;
+    }
+
+    /** 对比根 DO 的基本字段差异 */
+    private void diffRoot(
+            EntityMetadata metadata, Object beforeDO, Object afterDO, List<EntityChange> changes) {
+        DoMetadata doMeta = metadata.getDoMetadata();
+        List<FieldChange> fieldChanges = diffDoFields(beforeDO, afterDO, doMeta.getBasicFields());
+
+        if (fieldChanges.isEmpty()) {
+            changes.add(
+                    EntityChange.builder()
+                            .type(ChangeType.NONE)
+                            .entityClass(metadata.getEntityClass())
+                            .doClass(doMeta.getDoClass())
+                            .build());
+        } else {
+            Object id = doMeta.getId(afterDO);
+            changes.add(
+                    EntityChange.builder()
+                            .type(ChangeType.UPDATE)
                             .entityId(id)
                             .idFieldName(doMeta.getIdFieldName())
                             .entityClass(metadata.getEntityClass())
                             .doClass(doMeta.getDoClass())
+                            .fieldChanges(fieldChanges)
                             .build());
-            addSubEntityDeletes(
-                    before, metadata.getSubEntities(), metadata.getSubEntityLists(), changeSet);
-            return changeSet;
         }
-
-        // 更新场景：对比 before DO 和 after DO 的差异
-        RootChange rootChange = diffRootDO(beforeDO, afterDO, metadata);
-        changeSet.setRootChange(rootChange);
-        diffSubEntities(
-                before, after, metadata.getSubEntities(), metadata.getSubEntityLists(), changeSet);
-
-        return changeSet;
     }
 
-    /** 对比根 DO 的基本字段差异 */
-    private RootChange diffRootDO(Object beforeDO, Object afterDO, EntityMetadata metadata) {
-        DoMetadata doMeta = metadata.getDoMetadata();
-        List<FieldChange> fieldChanges = new ArrayList<>();
-        for (FieldAccessor accessor : doMeta.getBasicFields()) {
-            Object oldVal = accessor.getValue(beforeDO);
-            Object newVal = accessor.getValue(afterDO);
-            if (!Objects.equals(oldVal, newVal)) {
-                fieldChanges.add(new FieldChange(accessor.getFieldName(), oldVal, newVal));
-            }
-        }
-        if (fieldChanges.isEmpty()) {
-            return RootChange.builder()
-                    .type(ChangeType.NONE)
-                    .entityClass(metadata.getEntityClass())
-                    .doClass(doMeta.getDoClass())
-                    .build();
-        }
-        return RootChange.builder()
-                .type(ChangeType.UPDATE)
-                .idFieldName(doMeta.getIdFieldName())
-                .entityClass(metadata.getEntityClass())
-                .doClass(doMeta.getDoClass())
-                .fieldChanges(fieldChanges)
-                .build();
-    }
-
-    /** 递归对比子实体和子实体列表的差异 */
+    /** 递归对比子实体差异 */
     private void diffSubEntities(
-            Object before,
-            Object after,
-            List<EntityMetadata> subEntities,
-            List<EntityMetadata> subEntityLists,
-            ChangeSet changeSet) {
+            Object before, Object after, EntityMetadata metadata, List<EntityChange> changes) {
+        List<EntityMetadata> subMetas = metadata.getSubEntities();
+        List<EntityMetadata> listMetas = metadata.getSubEntityLists();
 
         // 对比一对一子实体
-        for (EntityMetadata subMeta : subEntities) {
-            DoMetadata subDoMeta = subMeta.getDoMetadata();
-            Object oldSubEntity = getSubEntityValue(before, subMeta.getEntityClass());
-            Object newSubEntity = getSubEntityValue(after, subMeta.getEntityClass());
-            Object oldSubDO =
-                    oldSubEntity != null
-                            ? entityCopier.toDO(oldSubEntity, subDoMeta.getDoClass())
-                            : null;
-            Object newSubDO =
-                    newSubEntity != null
-                            ? entityCopier.toDO(newSubEntity, subDoMeta.getDoClass())
-                            : null;
-
-            if (oldSubDO != null && newSubDO == null) {
-                Object id = subDoMeta.getId(oldSubDO);
-                changeSet.addSubEntityChange(
-                        SubEntityChange.builder()
-                                .type(ChangeType.DELETE)
-                                .entityId(id)
-                                .idFieldName(subDoMeta.getIdFieldName())
-                                .entityClass(subMeta.getEntityClass())
-                                .doClass(subDoMeta.getDoClass())
-                                .entity(oldSubDO)
-                                .build());
-                addSubEntityDeletes(
-                        oldSubEntity,
-                        subMeta.getSubEntities(),
-                        subMeta.getSubEntityLists(),
-                        changeSet);
-            } else if (oldSubDO == null && newSubDO != null) {
-                changeSet.addSubEntityChange(
-                        SubEntityChange.builder()
-                                .type(ChangeType.INSERT)
-                                .entityClass(subMeta.getEntityClass())
-                                .doClass(subDoMeta.getDoClass())
-                                .entity(newSubDO)
-                                .build());
-                addSubEntityInserts(
-                        newSubEntity,
-                        subMeta.getSubEntities(),
-                        subMeta.getSubEntityLists(),
-                        changeSet);
-            } else if (oldSubDO != null && newSubDO != null) {
-                List<FieldChange> changes =
-                        diffDoFields(oldSubDO, newSubDO, subDoMeta.getBasicFields());
-                if (!changes.isEmpty()) {
-                    Object id = subDoMeta.getId(newSubDO);
-                    changeSet.addSubEntityChange(
-                            SubEntityChange.builder()
-                                    .type(ChangeType.UPDATE)
-                                    .entityId(id)
-                                    .idFieldName(subDoMeta.getIdFieldName())
-                                    .entityClass(subMeta.getEntityClass())
-                                    .doClass(subDoMeta.getDoClass())
-                                    .entity(newSubDO)
-                                    .fieldChanges(changes)
-                                    .build());
-                }
-                diffSubEntities(
-                        oldSubEntity,
-                        newSubEntity,
-                        subMeta.getSubEntities(),
-                        subMeta.getSubEntityLists(),
-                        changeSet);
+        if (subMetas != null) {
+            for (EntityMetadata subMeta : subMetas) {
+                Object oldSub = getSubEntityValue(before, subMeta.getEntityClass());
+                Object newSub = getSubEntityValue(after, subMeta.getEntityClass());
+                diffOneSubEntity(oldSub, newSub, subMeta, changes);
             }
         }
 
         // 对比一对多子实体列表
-        for (EntityMetadata listMeta : subEntityLists) {
-            DoMetadata subDoMeta = listMeta.getDoMetadata();
-            List<?> oldSubEntities = getSubEntityListValue(before, listMeta.getEntityClass());
-            List<?> newSubEntities = getSubEntityListValue(after, listMeta.getEntityClass());
-            List<Object> oldSubDOs = toDOList(oldSubEntities, subDoMeta.getDoClass());
-            List<Object> newSubDOs = toDOList(newSubEntities, subDoMeta.getDoClass());
+        if (listMetas != null) {
+            for (EntityMetadata listMeta : listMetas) {
+                List<?> oldList = getSubEntityListValue(before, listMeta.getEntityClass());
+                List<?> newList = getSubEntityListValue(after, listMeta.getEntityClass());
+                diffSubEntityList(oldList, newList, listMeta, changes);
+            }
+        }
+    }
 
-            Map<Object, Object> oldMap = toIdMap(oldSubDOs, subDoMeta);
-            Map<Object, Object> newMap = toIdMap(newSubDOs, subDoMeta);
+    /** 对比单个子实体 */
+    private void diffOneSubEntity(
+            Object oldSub, Object newSub, EntityMetadata subMeta, List<EntityChange> changes) {
+        DoMetadata doMeta = subMeta.getDoMetadata();
 
-            // 检测删除
-            for (Object id : oldMap.keySet()) {
-                if (!newMap.containsKey(id)) {
-                    changeSet.addSubEntityChange(
-                            SubEntityChange.builder()
-                                    .type(ChangeType.DELETE)
+        if (oldSub != null && newSub == null) {
+            // 删除
+            Object doValue = converter.convert(oldSub, doMeta.getDoClass());
+            Object id = doMeta.getId(doValue);
+            changes.add(
+                    EntityChange.builder()
+                            .type(ChangeType.DELETE)
+                            .entityId(id)
+                            .idFieldName(doMeta.getIdFieldName())
+                            .entityClass(subMeta.getEntityClass())
+                            .doClass(doMeta.getDoClass())
+                            .entity(doValue)
+                            .build());
+            collectDeletes(oldSub, subMeta, changes);
+        } else if (oldSub == null && newSub != null) {
+            // 新增
+            Object doValue = converter.convert(newSub, doMeta.getDoClass());
+            changes.add(
+                    EntityChange.builder()
+                            .type(ChangeType.INSERT)
+                            .entityClass(subMeta.getEntityClass())
+                            .doClass(doMeta.getDoClass())
+                            .entity(doValue)
+                            .build());
+            collectInserts(newSub, subMeta, changes);
+        } else if (oldSub != null && newSub != null) {
+            // 更新
+            Object oldDO = converter.convert(oldSub, doMeta.getDoClass());
+            Object newDO = converter.convert(newSub, doMeta.getDoClass());
+            List<FieldChange> fieldChanges = diffDoFields(oldDO, newDO, doMeta.getBasicFields());
+            if (!fieldChanges.isEmpty()) {
+                Object id = doMeta.getId(newDO);
+                changes.add(
+                        EntityChange.builder()
+                                .type(ChangeType.UPDATE)
+                                .entityId(id)
+                                .idFieldName(doMeta.getIdFieldName())
+                                .entityClass(subMeta.getEntityClass())
+                                .doClass(doMeta.getDoClass())
+                                .entity(newDO)
+                                .fieldChanges(fieldChanges)
+                                .build());
+            }
+            // 递归比对嵌套子实体
+            diffSubEntities(oldSub, newSub, subMeta, changes);
+        }
+    }
+
+    /** 对比子实体列表，按主键映射后检测增删改 */
+    private void diffSubEntityList(
+            List<?> oldList, List<?> newList, EntityMetadata listMeta, List<EntityChange> changes) {
+        DoMetadata doMeta = listMeta.getDoMetadata();
+        Map<Object, Object> oldMap = toIdMap(oldList, doMeta);
+        Map<Object, Object> newMap = toIdMap(newList, doMeta);
+
+        // 遍历旧列表，检测删除和更新
+        for (Object id : oldMap.keySet()) {
+            if (!newMap.containsKey(id)) {
+                // 删除
+                changes.add(
+                        EntityChange.builder()
+                                .type(ChangeType.DELETE)
+                                .entityId(id)
+                                .idFieldName(doMeta.getIdFieldName())
+                                .entityClass(listMeta.getEntityClass())
+                                .doClass(doMeta.getDoClass())
+                                .entity(oldMap.get(id))
+                                .build());
+                Object oldEntity = findEntityById(oldList, id, doMeta);
+                if (oldEntity != null) {
+                    collectDeletes(oldEntity, listMeta, changes);
+                }
+            } else {
+                // 更新
+                Object oldDO = oldMap.get(id);
+                Object newDO = newMap.get(id);
+                List<FieldChange> fieldChanges =
+                        diffDoFields(oldDO, newDO, doMeta.getBasicFields());
+                if (!fieldChanges.isEmpty()) {
+                    changes.add(
+                            EntityChange.builder()
+                                    .type(ChangeType.UPDATE)
                                     .entityId(id)
-                                    .idFieldName(subDoMeta.getIdFieldName())
+                                    .idFieldName(doMeta.getIdFieldName())
                                     .entityClass(listMeta.getEntityClass())
-                                    .doClass(subDoMeta.getDoClass())
-                                    .entity(oldMap.get(id))
+                                    .doClass(doMeta.getDoClass())
+                                    .entity(newDO)
+                                    .fieldChanges(fieldChanges)
                                     .build());
-                    Object oldSubEntity = findEntityById(oldSubEntities, id, subDoMeta);
-                    addSubEntityDeletes(
-                            oldSubEntity,
-                            listMeta.getSubEntities(),
-                            listMeta.getSubEntityLists(),
-                            changeSet);
+                }
+                Object oldEntity = findEntityById(oldList, id, doMeta);
+                Object newEntity = findEntityById(newList, id, doMeta);
+                if (oldEntity != null && newEntity != null) {
+                    diffSubEntities(oldEntity, newEntity, listMeta, changes);
                 }
             }
-            // 检测新增
-            for (Object id : newMap.keySet()) {
-                if (!oldMap.containsKey(id)) {
-                    changeSet.addSubEntityChange(
-                            SubEntityChange.builder()
-                                    .type(ChangeType.INSERT)
-                                    .entityClass(listMeta.getEntityClass())
-                                    .doClass(subDoMeta.getDoClass())
-                                    .entity(newMap.get(id))
-                                    .build());
-                    Object newSubEntity = findEntityById(newSubEntities, id, subDoMeta);
-                    addSubEntityInserts(
-                            newSubEntity,
-                            listMeta.getSubEntities(),
-                            listMeta.getSubEntityLists(),
-                            changeSet);
-                }
-            }
-            // 检测更新
-            for (Object id : oldMap.keySet()) {
-                if (newMap.containsKey(id)) {
-                    List<FieldChange> changes =
-                            diffDoFields(
-                                    oldMap.get(id), newMap.get(id), subDoMeta.getBasicFields());
-                    if (!changes.isEmpty()) {
-                        changeSet.addSubEntityChange(
-                                SubEntityChange.builder()
-                                        .type(ChangeType.UPDATE)
-                                        .entityId(id)
-                                        .idFieldName(subDoMeta.getIdFieldName())
-                                        .entityClass(listMeta.getEntityClass())
-                                        .doClass(subDoMeta.getDoClass())
-                                        .entity(newMap.get(id))
-                                        .fieldChanges(changes)
-                                        .build());
-                    }
-                    Object oldSubEntity = findEntityById(oldSubEntities, id, subDoMeta);
-                    Object newSubEntity = findEntityById(newSubEntities, id, subDoMeta);
-                    diffSubEntities(
-                            oldSubEntity,
-                            newSubEntity,
-                            listMeta.getSubEntities(),
-                            listMeta.getSubEntityLists(),
-                            changeSet);
+        }
+
+        // 遍历新列表，检测新增
+        for (Object id : newMap.keySet()) {
+            if (!oldMap.containsKey(id)) {
+                changes.add(
+                        EntityChange.builder()
+                                .type(ChangeType.INSERT)
+                                .entityClass(listMeta.getEntityClass())
+                                .doClass(doMeta.getDoClass())
+                                .entity(newMap.get(id))
+                                .build());
+                Object newEntity = findEntityById(newList, id, doMeta);
+                if (newEntity != null) {
+                    collectInserts(newEntity, listMeta, changes);
                 }
             }
         }
     }
 
+    /** 对比两个 DO 对象的基本字段差异 */
     private List<FieldChange> diffDoFields(
             Object oldDO, Object newDO, List<FieldAccessor> basicFields) {
         List<FieldChange> changes = new ArrayList<>();
@@ -282,30 +272,24 @@ public class DiffEngine {
         return changes;
     }
 
-    private List<Object> toDOList(List<?> entities, Class<?> doClass) {
-        if (entities == null) return Collections.emptyList();
-        List<Object> result = new ArrayList<>();
-        for (Object entity : entities) {
-            result.add(entityCopier.toDO(entity, doClass));
-        }
-        return result;
-    }
-
-    private Map<Object, Object> toIdMap(List<Object> doList, DoMetadata doMeta) {
-        if (doList == null) return Collections.emptyMap();
+    /** 将实体列表转为 DO 后按主键映射为 Map */
+    private Map<Object, Object> toIdMap(List<?> entities, DoMetadata doMeta) {
+        if (entities == null) return Collections.emptyMap();
         Map<Object, Object> map = new LinkedHashMap<>();
-        for (Object doObj : doList) {
-            Object id = doMeta.getId(doObj);
-            map.put(id, doObj);
+        for (Object entity : entities) {
+            Object doValue = converter.convert(entity, doMeta.getDoClass());
+            Object id = doMeta.getId(doValue);
+            map.put(id, doValue);
         }
         return map;
     }
 
+    /** 从实体列表中根据主键值查找对应的原始 Entity 对象 */
     private Object findEntityById(List<?> entities, Object id, DoMetadata doMeta) {
         if (entities == null) return null;
         for (Object entity : entities) {
-            Object doObj = entityCopier.toDO(entity, doMeta.getDoClass());
-            Object entityId = doMeta.getId(doObj);
+            Object doValue = converter.convert(entity, doMeta.getDoClass());
+            Object entityId = doMeta.getId(doValue);
             if (Objects.equals(entityId, id)) {
                 return entity;
             }
@@ -313,10 +297,101 @@ public class DiffEngine {
         return null;
     }
 
+    /** 递归收集实体中所有子实体的插入变更 */
+    private void collectInserts(
+            Object entity, EntityMetadata metadata, List<EntityChange> changes) {
+        List<EntityMetadata> subMetas = metadata.getSubEntities();
+        if (subMetas != null) {
+            for (EntityMetadata subMeta : subMetas) {
+                Object subEntity = getSubEntityValue(entity, subMeta.getEntityClass());
+                if (subEntity != null) {
+                    DoMetadata doMeta = subMeta.getDoMetadata();
+                    changes.add(
+                            EntityChange.builder()
+                                    .type(ChangeType.INSERT)
+                                    .entityClass(subMeta.getEntityClass())
+                                    .doClass(doMeta.getDoClass())
+                                    .entity(converter.convert(subEntity, doMeta.getDoClass()))
+                                    .build());
+                    collectInserts(subEntity, subMeta, changes);
+                }
+            }
+        }
+        List<EntityMetadata> listMetas = metadata.getSubEntityLists();
+        if (listMetas != null) {
+            for (EntityMetadata listMeta : listMetas) {
+                List<?> subEntities = getSubEntityListValue(entity, listMeta.getEntityClass());
+                if (subEntities != null) {
+                    for (Object subEntity : subEntities) {
+                        DoMetadata doMeta = listMeta.getDoMetadata();
+                        changes.add(
+                                EntityChange.builder()
+                                        .type(ChangeType.INSERT)
+                                        .entityClass(listMeta.getEntityClass())
+                                        .doClass(doMeta.getDoClass())
+                                        .entity(converter.convert(subEntity, doMeta.getDoClass()))
+                                        .build());
+                        collectInserts(subEntity, listMeta, changes);
+                    }
+                }
+            }
+        }
+    }
+
+    /** 递归收集实体中所有子实体的删除变更 */
+    private void collectDeletes(
+            Object entity, EntityMetadata metadata, List<EntityChange> changes) {
+        List<EntityMetadata> subMetas = metadata.getSubEntities();
+        if (subMetas != null) {
+            for (EntityMetadata subMeta : subMetas) {
+                Object subEntity = getSubEntityValue(entity, subMeta.getEntityClass());
+                if (subEntity != null) {
+                    DoMetadata doMeta = subMeta.getDoMetadata();
+                    Object doValue = converter.convert(subEntity, doMeta.getDoClass());
+                    Object id = doMeta.getId(doValue);
+                    changes.add(
+                            EntityChange.builder()
+                                    .type(ChangeType.DELETE)
+                                    .entityId(id)
+                                    .idFieldName(doMeta.getIdFieldName())
+                                    .entityClass(subMeta.getEntityClass())
+                                    .doClass(doMeta.getDoClass())
+                                    .entity(doValue)
+                                    .build());
+                    collectDeletes(subEntity, subMeta, changes);
+                }
+            }
+        }
+        List<EntityMetadata> listMetas = metadata.getSubEntityLists();
+        if (listMetas != null) {
+            for (EntityMetadata listMeta : listMetas) {
+                List<?> subEntities = getSubEntityListValue(entity, listMeta.getEntityClass());
+                if (subEntities != null) {
+                    for (Object subEntity : subEntities) {
+                        DoMetadata doMeta = listMeta.getDoMetadata();
+                        Object doValue = converter.convert(subEntity, doMeta.getDoClass());
+                        Object id = doMeta.getId(doValue);
+                        changes.add(
+                                EntityChange.builder()
+                                        .type(ChangeType.DELETE)
+                                        .entityId(id)
+                                        .idFieldName(doMeta.getIdFieldName())
+                                        .entityClass(listMeta.getEntityClass())
+                                        .doClass(doMeta.getDoClass())
+                                        .entity(doValue)
+                                        .build());
+                        collectDeletes(subEntity, listMeta, changes);
+                    }
+                }
+            }
+        }
+    }
+
+    /** 从实体对象中读取指定类型的子实体字段值 */
     private Object getSubEntityValue(Object rootEntity, Class<?> entityClass) {
         if (rootEntity == null) return null;
         try {
-            for (java.lang.reflect.Field field : rootEntity.getClass().getDeclaredFields()) {
+            for (Field field : rootEntity.getClass().getDeclaredFields()) {
                 if (field.getType().equals(entityClass)) {
                     String getterName =
                             "get"
@@ -333,14 +408,14 @@ public class DiffEngine {
         }
     }
 
+    /** 从实体对象中读取指定元素类型的子实体列表字段值 */
     @SuppressWarnings("unchecked")
     private List<?> getSubEntityListValue(Object rootEntity, Class<?> entityClass) {
         if (rootEntity == null) return null;
         try {
-            for (java.lang.reflect.Field field : rootEntity.getClass().getDeclaredFields()) {
+            for (Field field : rootEntity.getClass().getDeclaredFields()) {
                 if (List.class.isAssignableFrom(field.getType())) {
-                    java.lang.reflect.ParameterizedType pt =
-                            (java.lang.reflect.ParameterizedType) field.getGenericType();
+                    ParameterizedType pt = (ParameterizedType) field.getGenericType();
                     Class<?> elementClass = (Class<?>) pt.getActualTypeArguments()[0];
                     if (elementClass.equals(entityClass)) {
                         String getterName =
@@ -356,106 +431,6 @@ public class DiffEngine {
             return null;
         } catch (Exception e) {
             throw new RuntimeException("无法读取子实体列表字段: " + entityClass.getName(), e);
-        }
-    }
-
-    private void addSubEntityInserts(
-            Object after,
-            List<EntityMetadata> subEntities,
-            List<EntityMetadata> subEntityLists,
-            ChangeSet changeSet) {
-        for (EntityMetadata subMeta : subEntities) {
-            DoMetadata subDoMeta = subMeta.getDoMetadata();
-            Object subEntity = getSubEntityValue(after, subMeta.getEntityClass());
-            if (subEntity != null) {
-                Object subDO = entityCopier.toDO(subEntity, subDoMeta.getDoClass());
-                changeSet.addSubEntityChange(
-                        SubEntityChange.builder()
-                                .type(ChangeType.INSERT)
-                                .entityClass(subMeta.getEntityClass())
-                                .doClass(subDoMeta.getDoClass())
-                                .entity(subDO)
-                                .build());
-                addSubEntityInserts(
-                        subEntity,
-                        subMeta.getSubEntities(),
-                        subMeta.getSubEntityLists(),
-                        changeSet);
-            }
-        }
-        for (EntityMetadata listMeta : subEntityLists) {
-            DoMetadata subDoMeta = listMeta.getDoMetadata();
-            List<?> subEntitiesList = getSubEntityListValue(after, listMeta.getEntityClass());
-            if (subEntitiesList != null) {
-                for (Object subEntity : subEntitiesList) {
-                    Object subDO = entityCopier.toDO(subEntity, subDoMeta.getDoClass());
-                    changeSet.addSubEntityChange(
-                            SubEntityChange.builder()
-                                    .type(ChangeType.INSERT)
-                                    .entityClass(listMeta.getEntityClass())
-                                    .doClass(subDoMeta.getDoClass())
-                                    .entity(subDO)
-                                    .build());
-                    addSubEntityInserts(
-                            subEntity,
-                            listMeta.getSubEntities(),
-                            listMeta.getSubEntityLists(),
-                            changeSet);
-                }
-            }
-        }
-    }
-
-    private void addSubEntityDeletes(
-            Object before,
-            List<EntityMetadata> subEntities,
-            List<EntityMetadata> subEntityLists,
-            ChangeSet changeSet) {
-        for (EntityMetadata subMeta : subEntities) {
-            DoMetadata subDoMeta = subMeta.getDoMetadata();
-            Object subEntity = getSubEntityValue(before, subMeta.getEntityClass());
-            if (subEntity != null) {
-                Object subDO = entityCopier.toDO(subEntity, subDoMeta.getDoClass());
-                Object id = subDoMeta.getId(subDO);
-                changeSet.addSubEntityChange(
-                        SubEntityChange.builder()
-                                .type(ChangeType.DELETE)
-                                .entityId(id)
-                                .idFieldName(subDoMeta.getIdFieldName())
-                                .entityClass(subMeta.getEntityClass())
-                                .doClass(subDoMeta.getDoClass())
-                                .entity(subDO)
-                                .build());
-                addSubEntityDeletes(
-                        subEntity,
-                        subMeta.getSubEntities(),
-                        subMeta.getSubEntityLists(),
-                        changeSet);
-            }
-        }
-        for (EntityMetadata listMeta : subEntityLists) {
-            DoMetadata subDoMeta = listMeta.getDoMetadata();
-            List<?> subEntitiesList = getSubEntityListValue(before, listMeta.getEntityClass());
-            if (subEntitiesList != null) {
-                for (Object subEntity : subEntitiesList) {
-                    Object subDO = entityCopier.toDO(subEntity, subDoMeta.getDoClass());
-                    Object id = subDoMeta.getId(subDO);
-                    changeSet.addSubEntityChange(
-                            SubEntityChange.builder()
-                                    .type(ChangeType.DELETE)
-                                    .entityId(id)
-                                    .idFieldName(subDoMeta.getIdFieldName())
-                                    .entityClass(listMeta.getEntityClass())
-                                    .doClass(subDoMeta.getDoClass())
-                                    .entity(subDO)
-                                    .build());
-                    addSubEntityDeletes(
-                            subEntity,
-                            listMeta.getSubEntities(),
-                            listMeta.getSubEntityLists(),
-                            changeSet);
-                }
-            }
         }
     }
 }

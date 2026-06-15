@@ -1,6 +1,7 @@
 package com.maiya.persistence.repository;
 
-import com.maiya.persistence.model.ChangeSet;
+import com.maiya.persistence.model.EntityChange;
+import java.util.List;
 
 /**
  * 聚合仓储接口，定义了聚合实体的持久化核心操作。
@@ -10,23 +11,23 @@ import com.maiya.persistence.model.ChangeSet;
  * @param <T> 聚合实体类型
  * @author 萨博
  */
-public interface AggregateRepository<T> {
+public interface PersistenceRepository<T> {
 
     /**
-     * 对比两个聚合实体对象，生成变更集。
+     * 对比两个聚合实体对象，生成变更列表。
      *
      * @param before 变更前的实体对象
      * @param after 变更后的实体对象
-     * @return 变更集
+     * @return 变更列表
      */
-    ChangeSet diff(T before, T after);
+    List<EntityChange> diff(T before, T after);
 
     /**
-     * 执行变更集，将差异同步到数据库。
+     * 执行变更列表，将差异同步到数据库。
      *
-     * @param changeSet 变更集
+     * @param changes 变更列表
      */
-    void execute(ChangeSet changeSet);
+    void execute(List<EntityChange> changes);
 
     /**
      * 一键持久化：先对比差异，再执行变更。
@@ -37,7 +38,7 @@ public interface AggregateRepository<T> {
      * @param after 变更后的实体对象
      */
     default void persist(T before, T after) {
-        ChangeSet changeSet = diff(before, after);
-        execute(changeSet);
+        List<EntityChange> changes = diff(before, after);
+        execute(changes);
     }
 }

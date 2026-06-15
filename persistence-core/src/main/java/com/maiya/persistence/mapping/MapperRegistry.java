@@ -1,6 +1,7 @@
 package com.maiya.persistence.mapping;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import io.github.linpeilie.annotations.AutoMapper;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Field;
@@ -16,8 +17,8 @@ import org.springframework.core.ResolvableType;
 /**
  * Mapper 注册中心，负责管理和缓存 MyBatis-Plus 的 BaseMapper 实例。
  *
- * <p>容器启动时扫描所有 BaseMapper Bean，解析其泛型参数获取对应的 DO Class， 同时预解析每个 DO 的元数据（主键、基本字段、Mapper），供
- * MetadataResolver 直接查表使用。
+ * <p>容器启动时扫描所有 BaseMapper Bean，解析其泛型参数获取对应的 DO Class， 同时通过 DO 上的 @AutoMapper 注解获取对应的 Entity Class，
+ * 预解析每个 DO 的元数据（主键、基本字段、Mapper），以 Entity Class 为 key 缓存，供 MetadataResolver 直接查表使用。
  *
  * @author 萨博
  */
@@ -26,8 +27,8 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
     /** Spring 应用上下文，用于从容器中获取 Mapper Bean */
     private ApplicationContext applicationContext;
 
-    /** DO 元数据注册表，Key 为 DO 类的简单名称（如 OrderDO），Value 为预解析的元数据 */
-    private final Map<String, DoMetadata> doMetadataMap = new HashMap<>();
+    /** DO 元数据注册表，Key 为 Entity 的 Class（通过 DO 上的 @AutoMapper 注解获取），Value 为预解析的元数据 */
+    private final Map<Class<?>, DoMetadata> doMetadataMap = new HashMap<>();
 
     /** MethodHandle 查找器 */
     private static final MethodHandles.Lookup LOOKUP = MethodHandles.lookup();
@@ -42,7 +43,10 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
         scanMappers();
     }
 
-    /** 扫描 Spring 容器中所有 BaseMapper Bean，解析泛型参数获取 DO Class， 同时预解析 DO 元数据并注册到注册表中。 */
+    /**
+     * 扫描 Spring 容器中所有 BaseMapper Bean，解析泛型参数获取 DO Class， 通过 @AutoMapper 注解获取 Entity Class， 预解析 DO
+     * 元数据并以 Entity Class 为 key 注册到注册表中。
+     */
     @SuppressWarnings("unchecked")
     private void scanMappers() {
         Map<String, BaseMapper> mapperBeans = applicationContext.getBeansOfType(BaseMapper.class);
@@ -50,8 +54,11 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
             BaseMapper<?> mapper = entry.getValue();
             Class<?> doClass = resolveDoClassFromMapper(mapper);
             if (doClass != null) {
-                DoMetadata doMetadata = resolveDoMetadata(doClass, mapper);
-                doMetadataMap.put(doClass.getSimpleName(), doMetadata);
+                Class<?> entityClass = resolveEntityClassFromDo(doClass);
+                if (entityClass != null) {
+                    DoMetadata doMetadata = resolveDoMetadata(doClass, mapper);
+                    doMetadataMap.put(entityClass, doMetadata);
+                }
             }
         }
     }
@@ -74,6 +81,17 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
     }
 
     /**
+     * 从 DO 类的 @AutoMapper 注解中解析对应的 Entity Class，注解不存在则返回 null。
+     *
+     * @param doClass DO 类
+     * @return Entity 类的 Class 对象，注解不存在则返回 null
+     */
+    private Class<?> resolveEntityClassFromDo(Class<?> doClass) {
+        AutoMapper autoMapper = doClass.getAnnotation(AutoMapper.class);
+        return autoMapper != null ? autoMapper.target() : null;
+    }
+
+    /**
      * 预解析 DO 类的元数据，包括主键字段、基本字段访问器和对应的 Mapper。
      *
      * @param doClass DO 类
@@ -83,13 +101,17 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
     private DoMetadata resolveDoMetadata(Class<?> doClass, BaseMapper<?> mapper) {
         DoMetadata metadata = new DoMetadata();
         metadata.setDoClass(doClass);
-        metadata.setSimpleName(doClass.getSimpleName());
         metadata.setMapper(mapper);
 
         // 遍历 DO 字段，识别主键和基本字段
         for (Field doField : doClass.getDeclaredFields()) {
             if (Modifier.isStatic(doField.getModifiers())
                     || Modifier.isTransient(doField.getModifiers())) {
+                continue;
+            }
+            if (doField.getAnnotation(com.baomidou.mybatisplus.annotation.TableField.class) != null
+                    && !doField.getAnnotation(com.baomidou.mybatisplus.annotation.TableField.class)
+                            .exist()) {
                 continue;
             }
             if (doField.getAnnotation(com.baomidou.mybatisplus.annotation.TableId.class) != null) {
@@ -143,26 +165,13 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
     }
 
     /**
-     * 根据 DO 类获取对应的 BaseMapper 实例。
+     * 根据 Entity Class 获取预解析的 DO 元数据。
      *
-     * @param doClass DO 数据对象类
-     * @param <T> DO 类型
-     * @return 对应的 BaseMapper 实例
-     */
-    @SuppressWarnings("unchecked")
-    public <T> BaseMapper<T> getMapper(Class<T> doClass) {
-        DoMetadata metadata = doMetadataMap.get(doClass.getSimpleName());
-        return metadata != null ? (BaseMapper<T>) metadata.getMapper() : null;
-    }
-
-    /**
-     * 根据 DO 类的简单名称获取预解析的 DO 元数据。
-     *
-     * @param simpleName DO 类的简单名称（如 OrderDO）
+     * @param entityClass Entity 类
      * @return DO 元数据，未找到则返回 null
      */
-    public DoMetadata getDoMetadata(String simpleName) {
-        return doMetadataMap.get(simpleName);
+    public DoMetadata getDoMetadata(Class<?> entityClass) {
+        return doMetadataMap.get(entityClass);
     }
 
     /**
@@ -171,7 +180,12 @@ public class MapperRegistry implements InitializingBean, ApplicationContextAware
      * @param doClass DO 类
      * @return DO 元数据，未找到则返回 null
      */
-    public DoMetadata getDoMetadata(Class<?> doClass) {
-        return doMetadataMap.get(doClass.getSimpleName());
+    public DoMetadata getDoMetadataByDoClass(Class<?> doClass) {
+        for (DoMetadata metadata : doMetadataMap.values()) {
+            if (metadata.getDoClass().equals(doClass)) {
+                return metadata;
+            }
+        }
+        return null;
     }
 }

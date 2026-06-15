@@ -2,104 +2,99 @@ package com.maiya.persistence.execution;
 
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.maiya.persistence.mapping.DoMetadata;
 import com.maiya.persistence.mapping.MapperRegistry;
 import com.maiya.persistence.model.*;
 import java.io.Serializable;
-import java.util.List;
+import java.util.*;
+import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * 变更执行器，负责将差异引擎生成的变更集（ChangeSet）实际执行到数据库。
+ * 变更执行器，负责将差异引擎生成的变更列表实际执行到数据库。
  *
- * <p>按照先删除、再插入、后更新、最后处理根实体的顺序执行， 确保外键约束和事务一致性。
+ * <p>按 DO 类型分组执行，同一类型的变更合并为批量操作：批量删除、批量插入、逐条更新。 执行顺序：删除→插入→更新，确保外键约束和事务一致性。
  *
- * <p>ChangeSet 中的 entity 已经是 DO 对象（由 DiffEngine 在比对前完成转换）， 因此执行时无需再次转换，直接使用即可。
+ * <p>变更列表中的 entity 已经是 DO 对象（由 DiffEngine 在比对前完成转换），因此执行时无需再次转换，直接使用即可。
  *
  * @author 萨博
  */
 @Component
 public class ChangeExecutor {
 
-    /** Mapper 注册中心，用于获取各实体对应的 BaseMapper */
     @Autowired private MapperRegistry mapperRegistry;
 
     /**
-     * 执行变更集，按顺序处理子实体的删除、插入、更新，最后执行根实体变更。
+     * 执行变更列表，按 DO 类型分组，批量处理删除和插入，逐条处理更新。
      *
-     * @param changeSet 变更集
+     * @param changes 变更列表
      */
+    @SuppressWarnings({"unchecked", "rawtypes"})
     @Transactional(rollbackFor = Exception.class)
-    public void execute(ChangeSet changeSet) {
-        if (changeSet.isEmpty()) {
+    public void execute(List<EntityChange> changes) {
+        if (changes == null || changes.isEmpty()) {
             return;
         }
 
-        // 先执行子实体删除，避免外键冲突
-        changeSet.getSubEntityChanges().stream()
-                .filter(c -> c.getType() == ChangeType.DELETE)
-                .forEach(this::executeDelete);
+        // 按 DO 类型分组
+        Map<Class<?>, List<EntityChange>> grouped =
+                changes.stream().collect(Collectors.groupingBy(EntityChange::getDoClass));
 
-        // 执行子实体插入
-        changeSet.getSubEntityChanges().stream()
-                .filter(c -> c.getType() == ChangeType.INSERT)
-                .forEach(this::executeInsert);
+        for (Map.Entry<Class<?>, List<EntityChange>> entry : grouped.entrySet()) {
+            Class<?> doClass = entry.getKey();
+            List<EntityChange> group = entry.getValue();
+            BaseMapper mapper = getMapper(doClass);
 
-        // 执行子实体更新
-        changeSet.getSubEntityChanges().stream()
-                .filter(c -> c.getType() == ChangeType.UPDATE)
-                .forEach(this::executeUpdate);
+            // 先执行删除，避免外键冲突
+            List<Serializable> deleteIds =
+                    group.stream()
+                            .filter(c -> c.getType() == ChangeType.DELETE)
+                            .map(EntityChange::getEntityId)
+                            .map(id -> (Serializable) id)
+                            .collect(Collectors.toList());
+            if (!deleteIds.isEmpty()) {
+                mapper.deleteBatchIds(deleteIds);
+            }
 
-        // 最后执行根实体变更
-        executeRootChange(changeSet.getRootChange());
-    }
+            // 批量插入
+            List<Object> insertEntities =
+                    group.stream()
+                            .filter(c -> c.getType() == ChangeType.INSERT)
+                            .map(EntityChange::getEntity)
+                            .collect(Collectors.toList());
+            for (Object entity : insertEntities) {
+                mapper.insert(entity);
+            }
 
-    /**
-     * 执行根实体变更（插入、更新、删除）。
-     *
-     * @param change 根实体变更描述
-     */
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private void executeRootChange(RootChange change) {
-        if (change.getType() == ChangeType.NONE) return;
-
-        BaseMapper mapper = mapperRegistry.getMapper(change.getDoClass());
-
-        switch (change.getType()) {
-            case INSERT:
-                // ChangeSet 中的 entity 已经是 DO 对象，直接插入
-                mapper.insert(change.getEntity());
-                break;
-            case UPDATE:
-                // 执行字段级别的更新
-                executeFieldLevelUpdate(
-                        change.getDoClass(),
-                        change.getIdFieldName(),
-                        change.getEntityId(),
-                        change.getFieldChanges());
-                break;
-            case DELETE:
-                // 根据主键删除
-                mapper.deleteById((Serializable) change.getEntityId());
-                break;
-            default:
-                break;
+            // 逐条更新（每条更新的字段可能不同）
+            group.stream()
+                    .filter(c -> c.getType() == ChangeType.UPDATE)
+                    .forEach(
+                            c ->
+                                    executeFieldLevelUpdate(
+                                            mapper,
+                                            c.getIdFieldName(),
+                                            c.getEntityId(),
+                                            c.getFieldChanges()));
         }
     }
 
     /**
      * 执行字段级别的更新，使用 UpdateWrapper 构造条件更新语句。
      *
-     * @param doClass DO 类
+     * @param mapper BaseMapper 实例
      * @param idFieldName 主键字段名
      * @param entityId 主键值
      * @param fieldChanges 变更的字段列表
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
     private void executeFieldLevelUpdate(
-            Class<?> doClass, String idFieldName, Object entityId, List<FieldChange> fieldChanges) {
-        BaseMapper mapper = mapperRegistry.getMapper(doClass);
+            BaseMapper mapper,
+            String idFieldName,
+            Object entityId,
+            List<FieldChange> fieldChanges) {
         UpdateWrapper wrapper = new UpdateWrapper<>();
         wrapper.eq(idFieldName, entityId);
         for (FieldChange fc : fieldChanges) {
@@ -109,39 +104,17 @@ public class ChangeExecutor {
     }
 
     /**
-     * 执行子实体插入。
+     * 根据 DO Class 获取对应的 BaseMapper 实例。
      *
-     * @param change 子实体变更描述
+     * @param doClass DO 类
+     * @return BaseMapper 实例
      */
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private void executeInsert(SubEntityChange change) {
-        BaseMapper mapper = mapperRegistry.getMapper(change.getDoClass());
-        // ChangeSet 中的 entity 已经是 DO 对象，直接插入
-        mapper.insert(change.getEntity());
-    }
-
-    /**
-     * 执行子实体更新。
-     *
-     * @param change 子实体变更描述
-     */
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private void executeUpdate(SubEntityChange change) {
-        executeFieldLevelUpdate(
-                change.getDoClass(),
-                change.getIdFieldName(),
-                change.getEntityId(),
-                change.getFieldChanges());
-    }
-
-    /**
-     * 执行子实体删除。
-     *
-     * @param change 子实体变更描述
-     */
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private void executeDelete(SubEntityChange change) {
-        BaseMapper mapper = mapperRegistry.getMapper(change.getDoClass());
-        mapper.deleteById((Serializable) change.getEntityId());
+    @SuppressWarnings("rawtypes")
+    private BaseMapper getMapper(Class<?> doClass) {
+        DoMetadata doMetadata = mapperRegistry.getDoMetadataByDoClass(doClass);
+        if (doMetadata == null) {
+            throw new IllegalArgumentException("DO " + doClass.getName() + " 对应的元数据未在注册表中找到");
+        }
+        return doMetadata.getMapper();
     }
 }

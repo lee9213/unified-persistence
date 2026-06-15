@@ -3,6 +3,7 @@ package com.maiya.persistence.mapping;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -10,10 +11,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /**
- * 实体元数据解析器，负责解析实体类（Entity）的结构并生成对应的实体元数据。
+ * 实体元数据解析器，负责解析实体类的结构并生成类级元数据模板。
  *
- * <p>DO 层面的元数据已在 MapperRegistry 启动时预解析为 DoMetadata， 本类只需将 Entity 字段与 DoMetadata 组装为 EntityMetadata。
- * 支持递归解析子实体的嵌套子实体。
+ * <p>核心方法 {@link #resolve(Class)} 接收实体类，返回缓存的类级元数据模板（doValue 为 null）， 描述实体类的 DO 映射、子实体结构等信息。
+ * 实例级数据填充（Entity→DO 转换）由调用方负责。
  *
  * @author 萨博
  */
@@ -22,8 +23,8 @@ public class MetadataResolver {
 
     @Autowired private MapperRegistry mapperRegistry;
 
-    /** 实体元数据缓存 */
-    private final Map<Class<?>, EntityMetadata> metadataCache = new ConcurrentHashMap<>();
+    /** 类级元数据模板缓存（doValue 为 null） */
+    private final Map<Class<?>, EntityMetadata> templateCache = new ConcurrentHashMap<>();
 
     public MetadataResolver() {}
 
@@ -31,33 +32,27 @@ public class MetadataResolver {
         this.mapperRegistry = mapperRegistry;
     }
 
-    public EntityMetadata resolve(Class<?> entityClass) {
-        return metadataCache.computeIfAbsent(entityClass, this::doResolve);
-    }
-
-    private EntityMetadata doResolve(Class<?> entityClass) {
-        EntityMetadata metadata = new EntityMetadata();
-        metadata.setEntityClass(entityClass);
-        metadata.setDoMetadata(resolveDoMetadata(entityClass));
-
-        // 递归解析子实体
-        resolveSubEntities(entityClass, metadata.getSubEntities(), metadata.getSubEntityLists());
-
-        return metadata;
-    }
-
     /**
-     * 递归解析实体类的子实体和子实体列表
+     * 解析实体类的元数据模板（类级，缓存，doValue 为 null）。
      *
      * @param entityClass 实体类
-     * @param subEntities 用于收集一对一子实体元数据的列表
-     * @param subEntityLists 用于收集一对多子实体列表元数据的列表
+     * @return 实体元数据模板
      */
-    private void resolveSubEntities(
-            Class<?> entityClass,
-            List<EntityMetadata> subEntities,
-            List<EntityMetadata> subEntityLists) {
+    public EntityMetadata resolve(Class<?> entityClass) {
+        return templateCache.computeIfAbsent(entityClass, this::doResolveTemplate);
+    }
 
+    /** 解析类级元数据模板，结果缓存 */
+    private EntityMetadata doResolveTemplate(Class<?> entityClass) {
+        EntityMetadata template = new EntityMetadata();
+        template.setEntityClass(entityClass);
+        template.setDoMetadata(resolveDoMetadata(entityClass));
+        resolveSubTemplates(entityClass, template);
+        return template;
+    }
+
+    /** 递归解析实体类的子实体和子实体列表结构模板 */
+    private void resolveSubTemplates(Class<?> entityClass, EntityMetadata template) {
         for (Field entityField : entityClass.getDeclaredFields()) {
             if (Modifier.isStatic(entityField.getModifiers())
                     || Modifier.isTransient(entityField.getModifiers())) {
@@ -69,60 +64,55 @@ public class MetadataResolver {
             if (isEntityType(fieldType)) {
                 DoMetadata subDoMeta = tryResolveDoMetadata(fieldType);
                 if (subDoMeta != null) {
-                    EntityMetadata subMeta = new EntityMetadata();
-                    subMeta.setEntityClass(fieldType);
-                    subMeta.setDoMetadata(subDoMeta);
-                    // 递归解析嵌套子实体
-                    resolveSubEntities(
-                            fieldType, subMeta.getSubEntities(), subMeta.getSubEntityLists());
-                    subEntities.add(subMeta);
+                    EntityMetadata subTemplate = new EntityMetadata();
+                    subTemplate.setEntityClass(fieldType);
+                    subTemplate.setDoMetadata(subDoMeta);
+                    resolveSubTemplates(fieldType, subTemplate);
+                    if (template.getSubEntities() == null) {
+                        template.setSubEntities(new ArrayList<>());
+                    }
+                    template.getSubEntities().add(subTemplate);
                 }
             } else if (List.class.isAssignableFrom(fieldType)) {
                 Class<?> elementClass = getGenericParameter(entityField);
                 if (isEntityType(elementClass)) {
                     DoMetadata subDoMeta = tryResolveDoMetadata(elementClass);
                     if (subDoMeta != null) {
-                        EntityMetadata subMeta = new EntityMetadata();
-                        subMeta.setEntityClass(elementClass);
-                        subMeta.setDoMetadata(subDoMeta);
-                        // 递归解析嵌套子实体
-                        resolveSubEntities(
-                                elementClass,
-                                subMeta.getSubEntities(),
-                                subMeta.getSubEntityLists());
-                        subEntityLists.add(subMeta);
+                        EntityMetadata subTemplate = new EntityMetadata();
+                        subTemplate.setEntityClass(elementClass);
+                        subTemplate.setDoMetadata(subDoMeta);
+                        resolveSubTemplates(elementClass, subTemplate);
+                        if (template.getSubEntityLists() == null) {
+                            template.setSubEntityLists(new ArrayList<>());
+                        }
+                        template.getSubEntityLists().add(subTemplate);
                     }
                 }
             }
         }
     }
 
+    /** 判断类是否为实体类（类名以 Entity 结尾） */
     private boolean isEntityType(Class<?> clazz) {
         return clazz.getSimpleName().endsWith("Entity");
     }
 
-    /**
-     * 根据 Entity 类从 MapperRegistry 中查找对应的预解析 DO 元数据。
-     *
-     * @param entityClass Entity 类
-     * @return 对应的 DO 元数据
-     * @throws IllegalArgumentException 如果 DO 元数据不存在于注册表中
-     */
+    /** 解析实体类对应的 DO 元数据，未找到则抛异常 */
     private DoMetadata resolveDoMetadata(Class<?> entityClass) {
-        String doSimpleName = entityClass.getSimpleName().replace("Entity", "DO");
-        DoMetadata doMetadata = mapperRegistry.getDoMetadata(doSimpleName);
+        DoMetadata doMetadata = mapperRegistry.getDoMetadata(entityClass);
         if (doMetadata == null) {
             throw new IllegalArgumentException(
-                    "Entity " + entityClass.getName() + " 对应的 DO 类 " + doSimpleName + " 未在注册表中找到");
+                    "Entity " + entityClass.getName() + " 对应的 DO 元数据未在注册表中找到");
         }
         return doMetadata;
     }
 
+    /** 尝试解析实体类对应的 DO 元数据，未找到返回 null */
     private DoMetadata tryResolveDoMetadata(Class<?> entityClass) {
-        String doSimpleName = entityClass.getSimpleName().replace("Entity", "DO");
-        return mapperRegistry.getDoMetadata(doSimpleName);
+        return mapperRegistry.getDoMetadata(entityClass);
     }
 
+    /** 获取 List 字段的泛型参数类型 */
     private Class<?> getGenericParameter(Field field) {
         ParameterizedType pt = (ParameterizedType) field.getGenericType();
         return (Class<?>) pt.getActualTypeArguments()[0];

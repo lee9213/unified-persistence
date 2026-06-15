@@ -11,7 +11,6 @@
 
     <modules>
         <module>persistence-core</module>
-        <module>persistence-mybatis</module>
         <module>persistence-example</module>
     </modules>
 
@@ -64,11 +63,7 @@
                 <artifactId>persistence-core</artifactId>
                 <version>${project.version}</version>
             </dependency>
-            <dependency>
-                <groupId>com.maiya</groupId>
-                <artifactId>persistence-mybatis</artifactId>
-                <version>${project.version}</version>
-            </dependency>
+
         </dependencies>
     </dependencyManagement>
 
