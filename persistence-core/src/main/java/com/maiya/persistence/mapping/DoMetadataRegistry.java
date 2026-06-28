@@ -13,15 +13,12 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * DO 元数据注册中心，负责扫描并缓存 Entity 与 DO 的映射元数据。
  *
- * <p>容器启动时扫描所有 Converter Bean，解析其命名规则或泛型参数获取 DO → Entity 映射关系，
+ * <p>容器启动时扫描所有 Converter Bean，解析其泛型参数获取 DO → Entity 映射关系，
  * 同时扫描所有 BaseMapper Bean，解析其泛型参数获取对应的 DO Class。
  * 预解析每个 DO 的元数据（主键、基本字段、Mapper），以 Entity Class 为 key 缓存，
  * 供 EntityMetadataResolver 直接查表使用。
@@ -41,9 +38,6 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
 
     /** MethodHandle 查找器 */
     private static final MethodHandles.Lookup LOOKUP = MethodHandles.lookup();
-
-    /** Converter Bean 名称的正则表达式匹配模式，例如：OrderDOToOrderEntityConverter */
-    private static final Pattern CONVERTER_NAME_PATTERN = Pattern.compile("^(.+)(To)(.+)(Converter|Convert)$");
 
     @Override
     public void setApplicationContext(ApplicationContext applicationContext) {
@@ -74,115 +68,18 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
 
     /**
      * 从 Spring 容器中的 Converter Bean 解析 DO → Entity 映射关系。
-     * MapStruct Plus 生成的 Converter Bean 命名规则：{Source}To{Target}Converter
-     * 例如：OrderDOToOrderEntityConverter → OrderDO → OrderEntity
+     * 通过 Converter<S, T> 接口的泛型参数解析：S 是源类型（DO），T 是目标类型（Entity）
      */
     private void resolveDoToEntityMapping() {
         Map<String, Converter> converterBeans = applicationContext.getBeansOfType(Converter.class);
-        Set<String> processedBeanNames = ConcurrentHashMap.newKeySet();
 
-        for (Map.Entry<String, Converter> entry : converterBeans.entrySet()) {
-            String beanName = entry.getKey();
-            if (processedBeanNames.contains(beanName)) {
-                continue;
-            }
-
-            // 尝试从 Bean 名称解析
-            Class<?>[] types = parseDoAndEntityFromBeanName(beanName);
+        for (Converter converter : converterBeans.values()) {
+            Class<?> converterClass = converter.getClass();
+            Class<?>[] types = parseDoAndEntityFromConverterClass(converterClass);
             if (types != null) {
                 DO_TO_ENTITY_MAP.put(types[0], types[1]);
-                processedBeanNames.add(beanName);
-                continue;
-            }
-
-            // 尝试从 Converter 接口的泛型参数解析
-            Class<?> converterClass = entry.getValue().getClass();
-            types = parseDoAndEntityFromConverterClass(converterClass);
-            if (types != null) {
-                DO_TO_ENTITY_MAP.put(types[0], types[1]);
-                processedBeanNames.add(beanName);
             }
         }
-    }
-
-    /**
-     * 从 Converter Bean 名称解析 DO 和 Entity 类型。
-     * 命名规则：{SourceDO}To{TargetEntity}Converter
-     *
-     * @param beanName Converter Bean 名称
-     * @return [DO类型, Entity类型]，解析失败返回 null
-     */
-    private Class<?>[] parseDoAndEntityFromBeanName(String beanName) {
-        Matcher matcher = CONVERTER_NAME_PATTERN.matcher(beanName);
-        if (!matcher.find()) {
-            return null;
-        }
-
-        String sourceTypeName = matcher.group(1);
-        String targetTypeName = matcher.group(3);
-
-        // 尝试在当前类路径下查找对应的类
-        Class<?> sourceClass = findClassBySimpleName(sourceTypeName);
-        Class<?> targetClass = findClassBySimpleName(targetTypeName);
-
-        if (sourceClass != null && targetClass != null) {
-            return new Class<?>[]{sourceClass, targetClass};
-        }
-        return null;
-    }
-
-    /**
-     * 根据简单类名在运行时类路径中查找对应的类。
-     *
-     * @param simpleName 简单类名（例如：OrderDO）
-     * @return 找到的类，未找到返回 null
-     */
-    private Class<?> findClassBySimpleName(String simpleName) {
-        // 获取应用主包路径，用于构建完整类名
-        String basePackage = getBasePackage();
-        try {
-            // 尝试多种可能的包路径组合
-            String[] possiblePackages = {
-                basePackage + ".data",
-                basePackage + ".do",
-                basePackage + ".dto",
-                basePackage + ".entity",
-                basePackage + ".model",
-                basePackage
-            };
-
-            for (String pkg : possiblePackages) {
-                try {
-                    String fullClassName = pkg + "." + simpleName;
-                    return Class.forName(fullClassName);
-                } catch (ClassNotFoundException e) {
-                    // 尝试下一个包
-                }
-            }
-        } catch (Exception e) {
-            // 忽略异常
-        }
-        return null;
-    }
-
-    /**
-     * 获取应用的基础包路径。
-     */
-    private String getBasePackage() {
-        // 尝试从 ApplicationContext 获取主类
-        String[] beanNames = applicationContext.getBeanDefinitionNames();
-        for (String beanName : beanNames) {
-            try {
-                Class<?> beanClass = applicationContext.getType(beanName);
-                if (beanClass != null && beanClass.isAnnotationPresent(
-                        Class.forName("org.springframework.boot.autoconfigure.SpringBootApplication"))) {
-                    return beanClass.getPackage().getName();
-                }
-            } catch (Exception e) {
-                // 忽略
-            }
-        }
-        return "com.example";
     }
 
     /**
@@ -194,7 +91,6 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
      */
     private Class<?>[] parseDoAndEntityFromConverterClass(Class<?> converterClass) {
         try {
-            // 遍历类层次结构，找到 Converter 接口
             Class<?> current = converterClass;
             while (current != null && current != Object.class) {
                 for (java.lang.reflect.Type type : current.getGenericInterfaces()) {
