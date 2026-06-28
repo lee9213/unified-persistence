@@ -49,11 +49,40 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
      */
     @Override
     public void afterSingletonsInstantiated() {
-        // 1. 先从 Converter Bean 解析 DO → Entity 映射关系
-        resolveDoToEntityMapping();
+        // 1. 获取所有 BaseMapper Bean 和所有 Converter Bean
+        Map<String, BaseMapper> mapperBeans = applicationContext.getBeansOfType(BaseMapper.class);
+        Map<String, Converter> converterBeans = applicationContext.getBeansOfType(Converter.class);
 
-        // 2. 扫描所有 BaseMapper，注册 DO 元数据
-        applicationContext.getBeansOfType(BaseMapper.class).values().forEach(mapper -> {
+        // 2. 收集所有需要解析的 Bean 类（Converter + Mapper 实现类）
+        // Converter 是实际的实现类，BaseMapper 是代理类需要通过 Bean 名称查找原始类
+        Map<String, Class<?>> classesToParse = new ConcurrentHashMap<>();
+
+        // 添加 Converter Bean 的实际类
+        for (Converter converter : converterBeans.values()) {
+            classesToParse.put(converter.getClass().getName(), converter.getClass());
+        }
+
+        // 添加 Mapper 实现类（通过 Bean 名称匹配）
+        String[] beanNames = applicationContext.getBeanDefinitionNames();
+        for (String beanName : beanNames) {
+            // Mapper Bean 名称通常以 "Mapper" 结尾或包含 "Impl"
+            if (beanName.endsWith("Mapper") || beanName.endsWith("MapperImpl")) {
+                try {
+                    Class<?> beanClass = applicationContext.getType(beanName);
+                    if (beanClass != null && !beanClass.isInterface()) {
+                        classesToParse.put(beanClass.getName(), beanClass);
+                    }
+                } catch (Exception e) {
+                    // 忽略
+                }
+            }
+        }
+
+        // 3. 从所有类中解析 DO → Entity 映射关系
+        resolveDoToEntityMapping(classesToParse);
+
+        // 4. 遍历所有 Mapper，注册 DO 元数据
+        mapperBeans.forEach((beanName, mapper) -> {
             Class<?> doClass = resolveDoClassFromMapper(mapper);
             if (doClass == null) {
                 return;
@@ -67,35 +96,22 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
     }
 
     /**
-     * 从 Spring 容器中的 Converter Bean 解析 DO → Entity 映射关系。
-     * 通过 BaseMapper<S, T> 接口的泛型参数解析：S 是源类型（DO），T 是目标类型（Entity）
+     * 从 Converter/Mapper 类集合中解析 DO → Entity 映射关系。
+     *
+     * @param classesToParse 需要解析的类
      */
-    private void resolveDoToEntityMapping() {
-        // 扫描所有 Bean，查找实现了 BaseMapper 接口的类
-        String[] beanNames = applicationContext.getBeanDefinitionNames();
-        for (String beanName : beanNames) {
-            try {
-                Class<?> beanClass = applicationContext.getType(beanName);
-                if (beanClass == null || beanClass.isInterface()) {
-                    continue;
-                }
-
-                // 检查是否实现了 BaseMapper 接口
-                Class<?>[] types = parseDoAndEntityFromConverterClass(beanClass);
-                if (types != null) {
-                    DO_TO_ENTITY_MAP.put(types[0], types[1]);
-                }
-            } catch (Exception e) {
-                // 忽略异常
+    private void resolveDoToEntityMapping(Map<String, Class<?>> classesToParse) {
+        for (Class<?> clazz : classesToParse.values()) {
+            Class<?>[] types = parseDoAndEntityFromConverterClass(clazz);
+            if (types != null) {
+                DO_TO_ENTITY_MAP.put(types[0], types[1]);
             }
         }
     }
 
     /**
      * 从 Converter 类的泛型参数解析 DO 和 Entity 类型。
-     * 遍历类层次结构，找到 Converter 或 BaseMapper 接口的泛型参数。
-     * - Converter<S, T>：S 是源类型，T 是目标类型
-     * - BaseMapper<S, T>：S 是源类型（DO），T 是目标类型（Entity）
+     * 遍历类层次结构，找到 BaseMapper 接口的泛型参数。
      *
      * @param converterClass Converter 实现类
      * @return [DO类型, Entity类型]，解析失败返回 null
@@ -104,7 +120,6 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
         try {
             Class<?> current = converterClass;
             while (current != null && current != Object.class) {
-                // 遍历当前类的所有接口（包括继承的接口）
                 for (java.lang.reflect.Type type : current.getGenericInterfaces()) {
                     Class<?>[] types = parseFromParameterizedType(type);
                     if (types != null) {
