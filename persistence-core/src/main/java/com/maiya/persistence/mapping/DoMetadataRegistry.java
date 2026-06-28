@@ -1,7 +1,6 @@
 package com.maiya.persistence.mapping;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
-import io.github.linpeilie.annotations.AutoMapper;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
@@ -18,7 +17,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * DO 元数据注册中心，负责扫描并缓存 Entity 与 DO 的映射元数据。
  *
- * <p>容器启动时扫描所有 BaseMapper Bean，解析其泛型参数获取对应的 DO Class， 同时通过 DO 上的 @AutoMapper 注解获取对应的 Entity Class，
+ * <p>容器启动时扫描所有 MyBatis-Plus BaseMapper Bean，解析其泛型参数获取对应的 DO Class，
+ * 同时通过扫描 linpeilie BaseMapper Bean（自动生成的 Converter）解析 DO 与 Entity 的映射关系，
  * 预解析每个 DO 的元数据（主键、基本字段、Mapper），以 Entity Class 为 key 缓存，供 EntityMetadataResolver 直接查表使用。
  *
  * @author 萨博
@@ -43,18 +43,66 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
      * 全部单例 Bean 实例化完成后扫描 Mapper，确保 MyBatis 代理已注册。
      */
     @Override
+    @SuppressWarnings({"rawtypes", "unchecked"})
     public void afterSingletonsInstantiated() {
-        applicationContext.getBeansOfType(BaseMapper.class).values().forEach(mapper -> {
-            Class<?> doClass = resolveDoClassFromMapper(mapper);
-            if (doClass == null) {
-                return;
-            }
-            Class<?> entityClass = resolveEntityClassFromDo(doClass);
+        // 1. 扫描 MyBatis Mapper，构建 DO Class -> Mapper 的映射
+        Map<Class<?>, BaseMapper<?>> doMapperMap = resolveDoMapperMap();
+
+        // 2. 建立 DO -> Entity 的映射关系（从 linpeilie BaseMapper 泛型解析）
+        Map<Class<?>, Class<?>> doEntityMap = resolveDoEntityMap(doMapperMap.keySet());
+
+        // 3. 注册 DO 元数据
+        doMapperMap.forEach((doClass, mapper) -> {
+            Class<?> entityClass = doEntityMap.get(doClass);
             if (entityClass == null) {
                 return;
             }
             DO_METADATA_MAP.put(entityClass, resolveDoMetadata(doClass, mapper));
         });
+    }
+
+    /**
+     * 从 ApplicationContext 获取所有 BaseMapper，解析其泛型参数，构建 DO Class -> Mapper 的映射。
+     *
+     * @return DO Class 到 Mapper 实例的映射
+     */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private Map<Class<?>, BaseMapper<?>> resolveDoMapperMap() {
+        Map<Class<?>, BaseMapper<?>> doMapperMap = new ConcurrentHashMap<>();
+        Map mybatisMappers = applicationContext.getBeansOfType(BaseMapper.class);
+        mybatisMappers.values().forEach(mapper -> {
+            BaseMapper<?> mybatisMapper = (BaseMapper<?>) mapper;
+            Class<?> doClass = resolveDoClassFromMapper(mybatisMapper);
+            if (doClass != null) {
+                doMapperMap.put(doClass, mybatisMapper);
+            }
+        });
+        return doMapperMap;
+    }
+
+    /**
+     * 从 linpeilie BaseMapper Bean 的泛型参数中解析 DO 与 Entity 的映射关系。
+     *
+     * @param doClasses 已知的 DO Class 集合，用于匹配判断哪个泛型是 DO
+     * @return DO Class 到 Entity Class 的映射
+     */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private Map<Class<?>, Class<?>> resolveDoEntityMap(java.util.Set<Class<?>> doClasses) {
+        Map<Class<?>, Class<?>> doEntityMap = new ConcurrentHashMap<>();
+        Map linpeilieMappers = applicationContext.getBeansOfType(io.github.linpeilie.BaseMapper.class);
+        linpeilieMappers.values().forEach(converter -> {
+            ResolvableType resolvableType = ResolvableType.forClass(converter.getClass()).as(io.github.linpeilie.BaseMapper.class);
+            Class<?> sourceClass = resolvableType.getGeneric(0).resolve();
+            Class<?> targetClass = resolvableType.getGeneric(1).resolve();
+            if (sourceClass != null && targetClass != null) {
+                if (doClasses.contains(sourceClass)) {
+                    doEntityMap.put(sourceClass, targetClass);
+                } else if (doClasses.contains(targetClass)) {
+                    doEntityMap.put(targetClass, sourceClass);
+                }
+            }
+        });
+        return doEntityMap;
     }
 
     /**
@@ -71,17 +119,6 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
             return generic;
         }
         return null;
-    }
-
-    /**
-     * 从 DO 类的 @AutoMapper 注解中解析对应的 Entity Class，注解不存在则返回 null。
-     *
-     * @param doClass DO 类
-     * @return Entity 类的 Class 对象，注解不存在则返回 null
-     */
-    private Class<?> resolveEntityClassFromDo(Class<?> doClass) {
-        AutoMapper autoMapper = doClass.getAnnotation(AutoMapper.class);
-        return autoMapper != null ? autoMapper.target() : null;
     }
 
     /**
