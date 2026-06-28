@@ -25,7 +25,7 @@
         <java.version>17</java.version>
         <mybatis-plus.version>3.5.5</mybatis-plus.version>
         <mapstruct-plus.version>1.4.8</mapstruct-plus.version>
-        <lombok.version>1.18.30</lombok.version>
+        <lombok.version>1.18.36</lombok.version>
     </properties>
 
     <dependencyManagement>

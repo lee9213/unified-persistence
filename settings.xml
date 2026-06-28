@@ -6,13 +6,24 @@
   <!-- localRepository -->
   <localRepository>/root/.m2/repository</localRepository>
 
+  <proxies>
+    <proxy>
+      <id>http-proxy</id>
+      <active>true</active>
+      <protocol>http</protocol>
+      <host>127.0.0.1</host>
+      <port>18080</port>
+      <nonProxyHosts>localhost|127.0.0.1|*.svc|*.cluster.local</nonProxyHosts>
+    </proxy>
+  </proxies>
+
   <mirrors>
-    <!-- 中科大镜像 -->
+    <!-- 阿里云公共仓库 -->
     <mirror>
-      <id>ustcmaven</id>
+      <id>aliyunmaven</id>
       <mirrorOf>*</mirrorOf>
-      <name>中科大镜像</name>
-      <url>https://maven.ustc.edu.cn/maven/</url>
+      <name>阿里云公共仓库</name>
+      <url>https://maven.aliyun.com/repository/public</url>
     </mirror>
   </mirrors>
 

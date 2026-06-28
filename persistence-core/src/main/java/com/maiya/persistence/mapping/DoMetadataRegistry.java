@@ -68,23 +68,34 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
 
     /**
      * 从 Spring 容器中的 Converter Bean 解析 DO → Entity 映射关系。
-     * 通过 Converter<S, T> 接口的泛型参数解析：S 是源类型（DO），T 是目标类型（Entity）
+     * 通过 BaseMapper<S, T> 接口的泛型参数解析：S 是源类型（DO），T 是目标类型（Entity）
      */
     private void resolveDoToEntityMapping() {
-        Map<String, Converter> converterBeans = applicationContext.getBeansOfType(Converter.class);
+        // 扫描所有 Bean，查找实现了 BaseMapper 接口的类
+        String[] beanNames = applicationContext.getBeanDefinitionNames();
+        for (String beanName : beanNames) {
+            try {
+                Class<?> beanClass = applicationContext.getType(beanName);
+                if (beanClass == null || beanClass.isInterface()) {
+                    continue;
+                }
 
-        for (Converter converter : converterBeans.values()) {
-            Class<?> converterClass = converter.getClass();
-            Class<?>[] types = parseDoAndEntityFromConverterClass(converterClass);
-            if (types != null) {
-                DO_TO_ENTITY_MAP.put(types[0], types[1]);
+                // 检查是否实现了 BaseMapper 接口
+                Class<?>[] types = parseDoAndEntityFromConverterClass(beanClass);
+                if (types != null) {
+                    DO_TO_ENTITY_MAP.put(types[0], types[1]);
+                }
+            } catch (Exception e) {
+                // 忽略异常
             }
         }
     }
 
     /**
      * 从 Converter 类的泛型参数解析 DO 和 Entity 类型。
-     * Converter<S, T> 接口的泛型参数：S 是源类型（DO），T 是目标类型（Entity）
+     * 遍历类层次结构，找到 Converter 或 BaseMapper 接口的泛型参数。
+     * - Converter<S, T>：S 是源类型，T 是目标类型
+     * - BaseMapper<S, T>：S 是源类型（DO），T 是目标类型（Entity）
      *
      * @param converterClass Converter 实现类
      * @return [DO类型, Entity类型]，解析失败返回 null
@@ -93,20 +104,11 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
         try {
             Class<?> current = converterClass;
             while (current != null && current != Object.class) {
+                // 遍历当前类的所有接口（包括继承的接口）
                 for (java.lang.reflect.Type type : current.getGenericInterfaces()) {
-                    if (type instanceof java.lang.reflect.ParameterizedType) {
-                        java.lang.reflect.ParameterizedType parameterizedType =
-                            (java.lang.reflect.ParameterizedType) type;
-                        if (parameterizedType.getRawType().equals(Converter.class)) {
-                            java.lang.reflect.Type[] typeArgs = parameterizedType.getActualTypeArguments();
-                            if (typeArgs.length == 2) {
-                                Class<?> sourceType = resolveTypeArgument(typeArgs[0]);
-                                Class<?> targetType = resolveTypeArgument(typeArgs[1]);
-                                if (sourceType != null && targetType != null) {
-                                    return new Class<?>[]{sourceType, targetType};
-                                }
-                            }
-                        }
+                    Class<?>[] types = parseFromParameterizedType(type);
+                    if (types != null) {
+                        return types;
                     }
                 }
                 current = current.getSuperclass();
@@ -114,6 +116,53 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
         } catch (Exception e) {
             // 忽略解析异常
         }
+        return null;
+    }
+
+    /**
+     * 从 ParameterizedType 中解析 DO 和 Entity 类型。
+     * 如果是接口类型，还会递归遍历其父接口。
+     */
+    private Class<?>[] parseFromParameterizedType(java.lang.reflect.Type type) {
+        if (!(type instanceof java.lang.reflect.ParameterizedType)) {
+            // 如果是普通接口类型，递归遍历其父接口
+            if (type instanceof Class<?> && ((Class<?>) type).isInterface()) {
+                Class<?> iface = (Class<?>) type;
+                for (java.lang.reflect.Type parentType : iface.getGenericInterfaces()) {
+                    Class<?>[] types = parseFromParameterizedType(parentType);
+                    if (types != null) {
+                        return types;
+                    }
+                }
+            }
+            return null;
+        }
+
+        java.lang.reflect.ParameterizedType parameterizedType = (java.lang.reflect.ParameterizedType) type;
+        java.lang.reflect.Type rawType = parameterizedType.getRawType();
+
+        // 检查是否是 Converter 或 BaseMapper 接口
+        if (rawType.equals(Converter.class) || rawType.getTypeName().endsWith("BaseMapper")) {
+            java.lang.reflect.Type[] typeArgs = parameterizedType.getActualTypeArguments();
+            if (typeArgs.length == 2) {
+                Class<?> sourceType = resolveTypeArgument(typeArgs[0]);
+                Class<?> targetType = resolveTypeArgument(typeArgs[1]);
+                if (sourceType != null && targetType != null) {
+                    return new Class<?>[]{sourceType, targetType};
+                }
+            }
+        }
+
+        // 如果是接口类型，递归遍历其父接口
+        if (rawType instanceof Class<?> && ((Class<?>) rawType).isInterface()) {
+            for (java.lang.reflect.Type parentType : ((Class<?>) rawType).getGenericInterfaces()) {
+                Class<?>[] types = parseFromParameterizedType(parentType);
+                if (types != null) {
+                    return types;
+                }
+            }
+        }
+
         return null;
     }
 
