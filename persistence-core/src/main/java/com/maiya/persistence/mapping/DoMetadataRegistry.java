@@ -53,29 +53,20 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
         Map<String, BaseMapper> mapperBeans = applicationContext.getBeansOfType(BaseMapper.class);
         Map<String, Converter> converterBeans = applicationContext.getBeansOfType(Converter.class);
 
-        // 2. 收集所有需要解析的 Bean 类（Converter + Mapper 实现类）
-        // Converter 是实际的实现类，BaseMapper 是代理类需要通过 Bean 名称查找原始类
+        // 2. 收集所有需要解析的类（Converter + Mapper 实现类）
+        // Converter Bean 的实际类是具体实现类，直接使用
+        // BaseMapper Bean 是 JDK 代理类，需要通过 Bean 类型查找原始 Mapper 实现类
         Map<String, Class<?>> classesToParse = new ConcurrentHashMap<>();
 
-        // 添加 Converter Bean 的实际类
+        // Converter Bean 的实际类（直接添加）
         for (Converter converter : converterBeans.values()) {
             classesToParse.put(converter.getClass().getName(), converter.getClass());
         }
 
-        // 添加 Mapper 实现类（通过 Bean 名称匹配）
-        String[] beanNames = applicationContext.getBeanDefinitionNames();
-        for (String beanName : beanNames) {
-            // Mapper Bean 名称通常以 "Mapper" 结尾或包含 "Impl"
-            if (beanName.endsWith("Mapper") || beanName.endsWith("MapperImpl")) {
-                try {
-                    Class<?> beanClass = applicationContext.getType(beanName);
-                    if (beanClass != null && !beanClass.isInterface()) {
-                        classesToParse.put(beanClass.getName(), beanClass);
-                    }
-                } catch (Exception e) {
-                    // 忽略
-                }
-            }
+        // 从 Converter Bean 的类名推断对应的 Mapper 实现类
+        // 例如：io.github.linpeilie.ConverterMapperAdapter__6 → com.maiya...OrderDOToOrderEntityMapperImpl
+        for (Converter converter : converterBeans.values()) {
+            findRelatedMapperImplClass(converter.getClass(), classesToParse);
         }
 
         // 3. 从所有类中解析 DO → Entity 映射关系
@@ -93,6 +84,95 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
             }
             DO_METADATA_MAP.put(entityClass, resolveDoMetadata(doClass, mapper));
         });
+    }
+
+    /**
+     * 从 Converter 类推断并查找关联的 Mapper 实现类。
+     */
+    private void findRelatedMapperImplClass(Class<?> converterClass, Map<String, Class<?>> classesToParse) {
+        // 获取类路径下的资源
+        try {
+            String classPath = System.getProperty("java.class.path");
+            String[] paths = classPath.split(System.getProperty("path.separator"));
+
+            System.out.println("[DoMetadataRegistry] classpath 路径数: " + paths.length);
+            for (String path : paths) {
+                System.out.println("[DoMetadataRegistry]   扫描路径: " + path);
+                if (path.contains("persistence-example") || path.contains("target/classes")) {
+                    findMapperImplClassesInPath(path, classesToParse);
+                }
+            }
+            System.out.println("[DoMetadataRegistry] 找到 MapperImpl 类: " + classesToParse.keySet());
+            System.out.println("[DoMetadataRegistry] 找到 MapperImpl 类数量: " + classesToParse.size());
+        } catch (Exception e) {
+            // 忽略扫描异常
+        }
+    }
+
+    /**
+     * 从指定路径下查找 Mapper 实现类。
+     */
+    private void findMapperImplClassesInPath(String path, Map<String, Class<?>> classesToParse) {
+        java.io.File file = new java.io.File(path);
+        if (file.isDirectory() && file.exists()) {
+            // 扫描整个目录下的所有 .class 文件
+            scanDirectory(file, classesToParse);
+        }
+    }
+
+    /**
+     * 递归扫描目录查找 Mapper 实现类。
+     */
+    private void scanDirectory(java.io.File dir, Map<String, Class<?>> classesToParse) {
+        java.io.File[] files = dir.listFiles();
+        if (files == null) return;
+
+        for (java.io.File file : files) {
+            if (file.isDirectory()) {
+                scanDirectory(file, classesToParse);
+            } else if (file.getName().endsWith(".class")) {
+                String fullPath = dir.getPath().replace("\\", "/");
+                String classFilePath = file.getPath().replace("\\", "/");
+
+                // 提取相对于 target/classes 的路径
+                String relativePath = "";
+                if (fullPath.contains("/target/classes/")) {
+                    relativePath = fullPath.substring(fullPath.indexOf("/target/classes/") + 15) + "/";
+                } else if (fullPath.contains("/target/test-classes/")) {
+                    relativePath = fullPath.substring(fullPath.indexOf("/target/test-classes/") + 19) + "/";
+                }
+
+                // 修复类名：移除前导点号
+                String className = (relativePath + file.getName().replace(".class", "")).replace("/", ".");
+                if (className.startsWith(".")) {
+                    className = className.substring(1);
+                }
+
+                try {
+                    Class<?> clazz = Class.forName(className);
+
+                    // 调试：打印类的接口
+                    if (className.contains("MapperImpl")) {
+                        java.lang.reflect.Type[] interfaces = clazz.getGenericInterfaces();
+                        System.out.println("[DoMetadataRegistry] 类: " + className + ", 接口数: " + interfaces.length);
+                        for (java.lang.reflect.Type iface : interfaces) {
+                            System.out.println("[DoMetadataRegistry]   接口: " + iface.getTypeName());
+                        }
+                        System.out.println("[DoMetadataRegistry]   父类: " + (clazz.getSuperclass() != null ? clazz.getSuperclass().getName() : "null"));
+                    }
+
+                    // 匹配 *DOTo*MapperImpl（DO → Entity 的映射）或 *EntityTo*DOMapperImpl（Entity → DO 的映射）
+                    boolean matches = (className.contains("DOToEntity") && className.endsWith("MapperImpl"))
+                        || (className.contains("EntityToDO") && className.endsWith("MapperImpl"));
+
+                    if (matches && BaseMapper.class.isAssignableFrom(clazz)) {
+                        classesToParse.put(className, clazz);
+                    }
+                } catch (Exception e) {
+                    // 忽略
+                }
+            }
+        }
     }
 
     /**
