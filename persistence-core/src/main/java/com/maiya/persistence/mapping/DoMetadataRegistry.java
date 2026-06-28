@@ -1,7 +1,6 @@
 package com.maiya.persistence.mapping;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
-import io.github.linpeilie.Converter;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
@@ -18,8 +17,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * DO 元数据注册中心，负责扫描并缓存 Entity 与 DO 的映射元数据。
  *
- * <p>容器启动时扫描所有 Converter Bean，解析其泛型参数获取 DO → Entity 映射关系，
- * 同时扫描所有 BaseMapper Bean，解析其泛型参数获取对应的 DO Class。
+ * <p>容器启动时扫描所有 MapStruct Plus 的 BaseMapper Bean，解析其泛型参数获取 DO → Entity 映射关系，
+ * 同时扫描所有 MyBatis 的 BaseMapper Bean，解析其泛型参数获取对应的 DO Class。
  * 预解析每个 DO 的元数据（主键、基本字段、Mapper），以 Entity Class 为 key 缓存，
  * 供 EntityMetadataResolver 直接查表使用。
  *
@@ -45,35 +44,28 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
     }
 
     /**
-     * 全部单例 Bean 实例化完成后扫描 Mapper 和 Converter，确保 MyBatis 代理已注册。
+     * 全部单例 Bean 实例化完成后扫描 Mapper，确保 MyBatis 代理已注册。
      */
     @Override
     public void afterSingletonsInstantiated() {
-        // 1. 获取所有 BaseMapper Bean 和所有 Converter Bean
-        Map<String, BaseMapper> mapperBeans = applicationContext.getBeansOfType(BaseMapper.class);
-        Map<String, Converter> converterBeans = applicationContext.getBeansOfType(Converter.class);
+        // 1. 获取所有 MapStruct Plus 的 BaseMapper Bean（DO → Entity 映射的 Mapper）
+        Map<String, io.github.linpeilie.BaseMapper> structMapperBeans =
+            applicationContext.getBeansOfType(io.github.linpeilie.BaseMapper.class);
 
-        // 2. 收集所有需要解析的类（Converter + Mapper 实现类）
-        // Converter Bean 的实际类是具体实现类，直接使用
-        // BaseMapper Bean 是 JDK 代理类，需要通过 Bean 类型查找原始 Mapper 实现类
-        Map<String, Class<?>> classesToParse = new ConcurrentHashMap<>();
-
-        // Converter Bean 的实际类（直接添加）
-        for (Converter converter : converterBeans.values()) {
-            classesToParse.put(converter.getClass().getName(), converter.getClass());
+        // 2. 从这些 Mapper Bean 中解析 DO → Entity 映射关系
+        for (io.github.linpeilie.BaseMapper structMapper : structMapperBeans.values()) {
+            Class<?> mapperClass = structMapper.getClass();
+            Class<?>[] types = parseDoAndEntityFromMapperClass(mapperClass);
+            if (types != null) {
+                DO_TO_ENTITY_MAP.put(types[0], types[1]);
+            }
         }
 
-        // 从 Converter Bean 的类名推断对应的 Mapper 实现类
-        // 例如：io.github.linpeilie.ConverterMapperAdapter__6 → com.maiya...OrderDOToOrderEntityMapperImpl
-        for (Converter converter : converterBeans.values()) {
-            findRelatedMapperImplClass(converter.getClass(), classesToParse);
-        }
+        // 3. 获取所有 MyBatis 的 BaseMapper Bean
+        Map<String, BaseMapper> mybatisMapperBeans = applicationContext.getBeansOfType(BaseMapper.class);
 
-        // 3. 从所有类中解析 DO → Entity 映射关系
-        resolveDoToEntityMapping(classesToParse);
-
-        // 4. 遍历所有 Mapper，注册 DO 元数据
-        mapperBeans.forEach((beanName, mapper) -> {
+        // 4. 遍历所有 MyBatis Mapper，注册 DO 元数据
+        mybatisMapperBeans.forEach((beanName, mapper) -> {
             Class<?> doClass = resolveDoClassFromMapper(mapper);
             if (doClass == null) {
                 return;
@@ -87,121 +79,18 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
     }
 
     /**
-     * 从 Converter 类推断并查找关联的 Mapper 实现类。
-     */
-    private void findRelatedMapperImplClass(Class<?> converterClass, Map<String, Class<?>> classesToParse) {
-        // 获取类路径下的资源
-        try {
-            String classPath = System.getProperty("java.class.path");
-            String[] paths = classPath.split(System.getProperty("path.separator"));
-
-            System.out.println("[DoMetadataRegistry] classpath 路径数: " + paths.length);
-            for (String path : paths) {
-                System.out.println("[DoMetadataRegistry]   扫描路径: " + path);
-                if (path.contains("persistence-example") || path.contains("target/classes")) {
-                    findMapperImplClassesInPath(path, classesToParse);
-                }
-            }
-            System.out.println("[DoMetadataRegistry] 找到 MapperImpl 类: " + classesToParse.keySet());
-            System.out.println("[DoMetadataRegistry] 找到 MapperImpl 类数量: " + classesToParse.size());
-        } catch (Exception e) {
-            // 忽略扫描异常
-        }
-    }
-
-    /**
-     * 从指定路径下查找 Mapper 实现类。
-     */
-    private void findMapperImplClassesInPath(String path, Map<String, Class<?>> classesToParse) {
-        java.io.File file = new java.io.File(path);
-        if (file.isDirectory() && file.exists()) {
-            // 扫描整个目录下的所有 .class 文件
-            scanDirectory(file, classesToParse);
-        }
-    }
-
-    /**
-     * 递归扫描目录查找 Mapper 实现类。
-     */
-    private void scanDirectory(java.io.File dir, Map<String, Class<?>> classesToParse) {
-        java.io.File[] files = dir.listFiles();
-        if (files == null) return;
-
-        for (java.io.File file : files) {
-            if (file.isDirectory()) {
-                scanDirectory(file, classesToParse);
-            } else if (file.getName().endsWith(".class")) {
-                String fullPath = dir.getPath().replace("\\", "/");
-                String classFilePath = file.getPath().replace("\\", "/");
-
-                // 提取相对于 target/classes 的路径
-                String relativePath = "";
-                if (fullPath.contains("/target/classes/")) {
-                    relativePath = fullPath.substring(fullPath.indexOf("/target/classes/") + 15) + "/";
-                } else if (fullPath.contains("/target/test-classes/")) {
-                    relativePath = fullPath.substring(fullPath.indexOf("/target/test-classes/") + 19) + "/";
-                }
-
-                // 修复类名：移除前导点号
-                String className = (relativePath + file.getName().replace(".class", "")).replace("/", ".");
-                if (className.startsWith(".")) {
-                    className = className.substring(1);
-                }
-
-                try {
-                    Class<?> clazz = Class.forName(className);
-
-                    // 调试：打印类的接口
-                    if (className.contains("MapperImpl")) {
-                        java.lang.reflect.Type[] interfaces = clazz.getGenericInterfaces();
-                        System.out.println("[DoMetadataRegistry] 类: " + className + ", 接口数: " + interfaces.length);
-                        for (java.lang.reflect.Type iface : interfaces) {
-                            System.out.println("[DoMetadataRegistry]   接口: " + iface.getTypeName());
-                        }
-                        System.out.println("[DoMetadataRegistry]   父类: " + (clazz.getSuperclass() != null ? clazz.getSuperclass().getName() : "null"));
-                    }
-
-                    // 匹配 *DOTo*MapperImpl（DO → Entity 的映射）或 *EntityTo*DOMapperImpl（Entity → DO 的映射）
-                    boolean matches = (className.contains("DOToEntity") && className.endsWith("MapperImpl"))
-                        || (className.contains("EntityToDO") && className.endsWith("MapperImpl"));
-
-                    if (matches && BaseMapper.class.isAssignableFrom(clazz)) {
-                        classesToParse.put(className, clazz);
-                    }
-                } catch (Exception e) {
-                    // 忽略
-                }
-            }
-        }
-    }
-
-    /**
-     * 从 Converter/Mapper 类集合中解析 DO → Entity 映射关系。
+     * 从 MapStruct Plus 的 Mapper 类解析 DO 和 Entity 类型。
+     * 遍历类层次结构，找到 BaseMapper<S, T> 接口的泛型参数。
      *
-     * @param classesToParse 需要解析的类
-     */
-    private void resolveDoToEntityMapping(Map<String, Class<?>> classesToParse) {
-        for (Class<?> clazz : classesToParse.values()) {
-            Class<?>[] types = parseDoAndEntityFromConverterClass(clazz);
-            if (types != null) {
-                DO_TO_ENTITY_MAP.put(types[0], types[1]);
-            }
-        }
-    }
-
-    /**
-     * 从 Converter 类的泛型参数解析 DO 和 Entity 类型。
-     * 遍历类层次结构，找到 BaseMapper 接口的泛型参数。
-     *
-     * @param converterClass Converter 实现类
+     * @param mapperClass Mapper 实现类
      * @return [DO类型, Entity类型]，解析失败返回 null
      */
-    private Class<?>[] parseDoAndEntityFromConverterClass(Class<?> converterClass) {
+    private Class<?>[] parseDoAndEntityFromMapperClass(Class<?> mapperClass) {
         try {
-            Class<?> current = converterClass;
+            Class<?> current = mapperClass;
             while (current != null && current != Object.class) {
                 for (java.lang.reflect.Type type : current.getGenericInterfaces()) {
-                    Class<?>[] types = parseFromParameterizedType(type);
+                    Class<?>[] types = parseFromBaseMapperType(type);
                     if (types != null) {
                         return types;
                     }
@@ -215,16 +104,16 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
     }
 
     /**
-     * 从 ParameterizedType 中解析 DO 和 Entity 类型。
-     * 如果是接口类型，还会递归遍历其父接口。
+     * 从 BaseMapper 接口类型中解析 DO 和 Entity 类型。
+     * 如果是其他接口类型，递归遍历其父接口。
      */
-    private Class<?>[] parseFromParameterizedType(java.lang.reflect.Type type) {
+    private Class<?>[] parseFromBaseMapperType(java.lang.reflect.Type type) {
         if (!(type instanceof java.lang.reflect.ParameterizedType)) {
             // 如果是普通接口类型，递归遍历其父接口
             if (type instanceof Class<?> && ((Class<?>) type).isInterface()) {
                 Class<?> iface = (Class<?>) type;
                 for (java.lang.reflect.Type parentType : iface.getGenericInterfaces()) {
-                    Class<?>[] types = parseFromParameterizedType(parentType);
+                    Class<?>[] types = parseFromBaseMapperType(parentType);
                     if (types != null) {
                         return types;
                     }
@@ -236,8 +125,8 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
         java.lang.reflect.ParameterizedType parameterizedType = (java.lang.reflect.ParameterizedType) type;
         java.lang.reflect.Type rawType = parameterizedType.getRawType();
 
-        // 检查是否是 Converter 或 BaseMapper 接口
-        if (rawType.equals(Converter.class) || rawType.getTypeName().endsWith("BaseMapper")) {
+        // 检查是否是 MapStruct Plus 的 BaseMapper 接口
+        if (rawType.getTypeName().equals("io.github.linpeilie.BaseMapper")) {
             java.lang.reflect.Type[] typeArgs = parameterizedType.getActualTypeArguments();
             if (typeArgs.length == 2) {
                 Class<?> sourceType = resolveTypeArgument(typeArgs[0]);
@@ -251,7 +140,7 @@ public class DoMetadataRegistry implements SmartInitializingSingleton, Applicati
         // 如果是接口类型，递归遍历其父接口
         if (rawType instanceof Class<?> && ((Class<?>) rawType).isInterface()) {
             for (java.lang.reflect.Type parentType : ((Class<?>) rawType).getGenericInterfaces()) {
-                Class<?>[] types = parseFromParameterizedType(parentType);
+                Class<?>[] types = parseFromBaseMapperType(parentType);
                 if (types != null) {
                     return types;
                 }
